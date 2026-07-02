@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 # ----------------------------------------------------------------------------
 # Config file (API keys + auto-change settings)
@@ -242,7 +242,17 @@ cmd_preview() {
 # ----------------------------------------------------------------------------
 # Interactive picker.  TSV columns: id \t label \t full_url \t thumb_url
 # Echoes the chosen "id\tlabel\tfull_url\tthumb_url" line, empty if cancelled.
+#
+# fzf lines are "thumb_path \t id \t label" — the thumb path is a standalone
+# hidden field so {1} can be used directly (fzf shell-quotes placeholders, so
+# embedding {1} inside another string breaks the path).
 # ----------------------------------------------------------------------------
+FZF_STYLE=(
+  --ansi --layout=reverse --border=rounded --info=inline-right
+  --pointer='▌' --marker='' --highlight-line
+  --color='border:8,header:italic:8,prompt:6,pointer:5,info:8,hl:5,hl+:5'
+)
+
 pick() {
   local tsv="$1"
   [[ -s "$tsv" ]] || die "no results"
@@ -260,17 +270,18 @@ pick() {
     warn "chafa not installed — list only. Inline previews:  sudo pacman -S chafa"
   fi
 
-  local prevcmd='(no preview — install chafa)'
-  [[ $have_chafa -eq 1 ]] && prevcmd='f="'"$thumbs"'/{1}.img"; [ -f "$f" ] && chafa -f symbols --polite on -s "${FZF_PREVIEW_COLUMNS:-40}x${FZF_PREVIEW_LINES:-20}" "$f" || echo "(loading…)"'
+  local prevcmd='echo "install chafa for previews:  sudo pacman -S chafa"'
+  [[ $have_chafa -eq 1 ]] && \
+    prevcmd='[ -s {1} ] && chafa -f symbols --polite on -s "${FZF_PREVIEW_COLUMNS:-40}x${FZF_PREVIEW_LINES:-20}" {1} || echo "thumbnail unavailable"'
 
   local chosen
-  chosen=$(awk -F'\t' '{printf "%s\t%s\n",$1,$2}' "$tsv" \
-    | fzf --with-nth=2.. --delimiter='\t' --ansi \
-          --preview="$prevcmd" --preview-window='right,55%,border-left' \
-          --prompt='wallpaper> ' \
-          --header='Enter: set · Ctrl-O: open full image · Esc: cancel' \
-          --bind="ctrl-o:execute-silent(setsid imv '$thumbs/{1}.img' >/dev/null 2>&1 &)") || return 1
-  local cid=${chosen%%$'\t'*}
+  chosen=$(awk -F'\t' -v t="$thumbs" '{printf "%s/%s.img\t%s\t%s\n", t, $1, $1, $2}' "$tsv" \
+    | fzf "${FZF_STYLE[@]}" --with-nth=3.. --delimiter='\t' \
+          --preview="$prevcmd" --preview-window='right,60%,border-rounded' \
+          --prompt='  wallpaper ❯ ' \
+          --header='enter set · ctrl-o open full · esc cancel' \
+          --bind='ctrl-o:execute-silent(setsid imv {1} >/dev/null 2>&1 &)') || return 1
+  local cid; cid=$(cut -f2 <<<"$chosen")
   grep -P "^${cid}\t" "$tsv" | head -n1 || return 1
 }
 
@@ -303,7 +314,7 @@ fetch_wallhaven() {
     | jq -r --argjson lim "$LIMIT" '
         .data[:$lim][]
         | [ .id,
-            "\(.resolution)  \(.category)  ♥\(.favorites)",
+            "[36m\(.resolution)[0m [2m·[0m \(.category) [2m·[0m [35m♥ \(.favorites)[0m",
             .path,
             (.thumbs.large // .thumbs.original)
           ] | @tsv'
@@ -317,7 +328,7 @@ fetch_unsplash() {
     "https://api.unsplash.com/search/photos" \
     --data-urlencode "query=$query" --data-urlencode "per_page=$LIMIT" \
     --data-urlencode "orientation=landscape" \
-    | jq -r '.results[] | [ .id, "\(.width)x\(.height)  @\(.user.username)", .urls.full, .urls.small ] | @tsv'
+    | jq -r '.results[] | [ .id, "[36m\(.width)x\(.height)[0m [2m·[0m @\(.user.username)", .urls.full, .urls.small ] | @tsv'
 }
 
 fetch_pexels() {
@@ -328,7 +339,7 @@ fetch_pexels() {
     "https://api.pexels.com/v1/search" \
     --data-urlencode "query=$query" --data-urlencode "per_page=$LIMIT" \
     --data-urlencode "orientation=landscape" \
-    | jq -r '.photos[] | [ (.id|tostring), "\(.width)x\(.height)  @\(.photographer)", .src.original, .src.medium ] | @tsv'
+    | jq -r '.photos[] | [ (.id|tostring), "[36m\(.width)x\(.height)[0m [2m·[0m @\(.photographer)", .src.original, .src.medium ] | @tsv'
 }
 
 fetch() {
@@ -413,12 +424,12 @@ cmd_library() {
   mapfile -t files < <(find "$LIB_DIR" -maxdepth 1 -type f \
     \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | sort)
   ((${#files[@]})) || die "no images in $LIB_DIR"
-  local sel prev='(install chafa for previews)'
+  local sel prev='echo "install chafa for previews:  sudo pacman -S chafa"'
   command -v chafa >/dev/null 2>&1 && prev='chafa -f symbols --polite on -s "${FZF_PREVIEW_COLUMNS:-40}x${FZF_PREVIEW_LINES:-20}" {}'
   sel=$(printf '%s\n' "${files[@]}" \
-    | fzf --prompt='library> ' --with-nth=-1 --delimiter=/ \
-          --preview="$prev" --preview-window='right,55%,border-left' \
-          --header='Enter: set · Ctrl-O: open full image' \
+    | fzf "${FZF_STYLE[@]}" --prompt='  library ❯ ' --with-nth=-1 --delimiter=/ \
+          --preview="$prev" --preview-window='right,60%,border-rounded' \
+          --header='enter set · ctrl-o open full · esc cancel' \
           --bind='ctrl-o:execute-silent(setsid imv {} >/dev/null 2>&1 &)') \
     || { info "cancelled"; return 0; }
   apply "$sel"
