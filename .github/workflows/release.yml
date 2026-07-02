@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          bash -n bin/wallpaper
+          shellcheck -S warning bin/wallpaper install.sh
+
+      - name: Package per-platform artifacts
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          write_notes() {
+            case "$1" in
+              linux)
+                printf '%s\n' \
+                  "Linux (Omarchy / Hyprland / GNOME)" \
+                  "  ./install.sh            # symlinks into ~/.local/bin" \
+                  "Deps: curl jq fzf; chafa (previews); swaybg or gsettings backend." ;;
+              macos)
+                printf '%s\n' \
+                  "macOS" \
+                  "  brew install jq fzf chafa" \
+                  "  ./install.sh            # symlinks into ~/.local/bin" \
+                  "Wallpaper is applied via osascript (System Events)." \
+                  "Scheduler: use launchd to run 'wallpaper random' (systemd is Linux-only)." ;;
+              windows)
+                printf '%s\n' \
+                  "Windows (Git Bash or WSL)" \
+                  "  Git Bash: install jq + fzf (e.g. via scoop), then ./install.sh" \
+                  "  Wallpaper is applied via PowerShell (SystemParametersInfo)." \
+                  "  WSL: follow the Linux instructions inside your distro." \
+                  "Scheduler: use Task Scheduler to run 'wallpaper random'." ;;
+            esac
+          }
+
+          for os in linux macos windows; do
+            pkg="wallpaper-${VERSION}-${os}"
+            mkdir -p "dist/$pkg"
+            cp bin/wallpaper install.sh README.md LICENSE "dist/$pkg/"
+            write_notes "$os" > "dist/$pkg/INSTALL.txt"
+            if [ "$os" = windows ]; then
+              (cd dist && zip -qr "$pkg.zip" "$pkg")
+            else
+              tar -C dist -czf "dist/$pkg.tar.gz" "$pkg"
+            fi
+            rm -rf "dist/$pkg"
+          done
+
+          (cd dist && sha256sum ./*.tar.gz ./*.zip > checksums.txt)
+          ls -la dist/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          generate_release_notes: true

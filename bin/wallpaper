@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+#
+# wallpaper — fetch & set desktop wallpapers for Omarchy / Hyprland from the
+# best online providers, with an interactive terminal picker (image previews),
+# an API-key manager, and a systemd-based scheduler for automatic changes.
+#
+#   Sources : Wallhaven (default, no key) · Unsplash · Pexels  (keys optional)
+#   Preview : chafa renders thumbnails inline; imv opens the full image (Ctrl-O)
+#   Applies : via `omarchy theme bg set` (swaybg + current/background symlink)
+#   Library : full-res downloads kept in ~/Pictures/Wallpapers
+#   Auto    : `wallpaper auto daily|hourly|weekly|custom <expr>` (systemd timer)
+#
+# Config & keys live in ~/.config/wallpaper/config — manage with `wallpaper config`.
+#
+# https://github.com/  (your repo)   MIT License
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ----------------------------------------------------------------------------
+# Config file (API keys + auto-change settings)
+# ----------------------------------------------------------------------------
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wallpaper"
+CONFIG_FILE="$CONFIG_DIR/config"
+# shellcheck source=/dev/null
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+# ----------------------------------------------------------------------------
+# Defaults (config file / env can override the *_API_KEY and AUTO_* values)
+# ----------------------------------------------------------------------------
+LIB_DIR="${WALLPAPER_DIR:-$HOME/Pictures/Wallpapers}"
+SOURCE="wallhaven"
+CATEGORIES="111"   # general / anime / people   (wallhaven bitmask)
+PURITY="100"       # sfw only
+SORTING="relevance"
+LIMIT=24
+PREVIEW=1
+ATLEAST=""         # min resolution filter (auto-detected from your monitor)
+HF_MODEL="${HF_MODEL:-black-forest-labs/FLUX.1-schnell}"   # AI generation model
+
+# ----------------------------------------------------------------------------
+# Pretty output
+# ----------------------------------------------------------------------------
+c_bold=$'\e[1m'; c_dim=$'\e[2m'; c_grn=$'\e[32m'; c_red=$'\e[31m'; c_yel=$'\e[33m'; c_rst=$'\e[0m'
+# Temp files/dirs cleaned up once, on exit (avoids RETURN-trap scope leaks under set -u)
+TMPFILES=()
+cleanup() { (( ${#TMPFILES[@]} )) && rm -rf "${TMPFILES[@]}" 2>/dev/null || true; }
+trap cleanup EXIT
+mktmp() { local t; t="$(mktemp "$@")"; TMPFILES+=("$t"); printf '%s' "$t"; }
+info() { printf '%s==>%s %s\n' "$c_grn" "$c_rst" "$*" >&2; }
+warn() { printf '%s!!%s %s\n'  "$c_red" "$c_rst" "$*" >&2; }
+die()  { warn "$*"; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send -t 2500 "Wallpaper" "$1" || true; }
+
+usage() {
+  cat >&2 <<EOF
+${c_bold}wallpaper${c_rst} — fetch & set wallpapers for Omarchy from the best providers
+
+${c_bold}BROWSE & SET${c_rst}
+  wallpaper [search] <query...>     search a provider, pick with preview, set
+  wallpaper                         prompt for a search term
+  wallpaper random [query...]       grab one random match and set it now
+  wallpaper library                 re-pick from wallpapers you've downloaded
+  wallpaper set <path>              set a local image file
+  wallpaper next                    cycle bg (wraps 'omarchy theme bg next')
+  wallpaper current                 show the current wallpaper path
+  wallpaper preview <path>          render an image in the terminal (chafa/imv)
+
+${c_bold}AI GENERATION (Hugging Face open models)${c_rst}
+  wallpaper generate <prompt...>    generate a wallpaper with an open model
+     default model: black-forest-labs/FLUX.1-schnell (override: --model or config)
+     needs a free HF token: https://huggingface.co/settings/tokens
+
+${c_bold}API KEYS / CONFIG${c_rst}
+  wallpaper config                  show current config (keys masked)
+  wallpaper config keys             interactively enter API keys
+  wallpaper config set-key <provider> <key>   wallhaven|unsplash|pexels|huggingface
+  wallpaper config set-model <id>   set the AI generation model
+  wallpaper config path             print the config file path
+
+${c_bold}AUTO-CHANGE (systemd timer)${c_rst}
+  wallpaper auto hourly  [query]    change every hour
+  wallpaper auto daily   [query]    change every day
+  wallpaper auto weekly  [query]    change every week
+  wallpaper auto custom "<expr>" [query]   custom schedule (systemd OnCalendar)
+  wallpaper auto status             show schedule + next run
+  wallpaper auto off                stop automatic changes
+     (add --categories 100 for category-based; omit query for fully random)
+
+${c_bold}OPTIONS${c_rst}
+  -s, --source <name>    wallhaven (default) | unsplash | pexels
+  -c, --categories <b>   wallhaven bitmask general/anime/people (default 111)
+  -p, --purity <b>       wallhaven bitmask sfw/sketchy/nsfw    (default 100)
+      --sort <mode>      relevance|random|toplist|views|favorites|date_added
+  -n, --limit <N>        number of results to fetch (default $LIMIT)
+      --atleast <WxH>    minimum resolution (default: your screen)
+      --model <id>       Hugging Face model for 'generate' (default: $HF_MODEL)
+      --no-preview       list without thumbnail previews
+  -v, --version          print version
+  -h, --help             this help
+
+${c_bold}EXAMPLES${c_rst}
+  wallpaper mountains at night
+  wallpaper --sort toplist --categories 100 minimal
+  wallpaper random cyberpunk city
+  wallpaper generate a cozy cabin in snowy mountains, golden hour
+  wallpaper auto daily nature
+  wallpaper auto custom "*-*-* 08,20:00:00"      # 8am and 8pm every day
+  wallpaper config keys
+EOF
+}
+
+# ----------------------------------------------------------------------------
+# Config helpers
+# ----------------------------------------------------------------------------
+config_set() {  # key value
+  local key="$1" val="$2" tmp
+  mkdir -p "$CONFIG_DIR"; touch "$CONFIG_FILE"; chmod 600 "$CONFIG_FILE"
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$CONFIG_FILE" >"$tmp" 2>/dev/null || true
+  printf '%s=%q\n' "$key" "$val" >>"$tmp"
+  mv "$tmp" "$CONFIG_FILE"; chmod 600 "$CONFIG_FILE"
+}
+
+mask() { local v="${1:-}"; [[ -z "$v" ]] && { printf '%s—%s' "$c_dim" "$c_rst"; return; }; printf '%sset%s (%s…)' "$c_grn" "$c_rst" "${v:0:4}"; }
+
+cmd_config() {
+  local sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    path) echo "$CONFIG_FILE" ;;
+    show)
+      echo "${c_bold}Config:${c_rst} $CONFIG_FILE"
+      printf '  %-16s %b\n' "wallhaven key" "$(mask "${WALLHAVEN_API_KEY:-}")"
+      printf '  %-16s %b\n' "unsplash key"  "$(mask "${UNSPLASH_API_KEY:-}")"
+      printf '  %-16s %b\n' "pexels key"    "$(mask "${PEXELS_API_KEY:-}")"
+      printf '  %-16s %b\n' "huggingface"   "$(mask "${HF_API_KEY:-}")"
+      printf '  %-16s %s\n' "ai model"      "$HF_MODEL"
+      echo   "  ${c_dim}auto-change:${c_rst}"
+      printf '  %-16s %s\n' "source"     "${AUTO_SOURCE:-wallhaven}"
+      printf '  %-16s %s\n' "query"      "${AUTO_QUERY:-<random>}"
+      printf '  %-16s %s\n' "categories" "${AUTO_CATEGORIES:-111}"
+      ;;
+    set-key)
+      local p="${1:-}" k="${2:-}"
+      [[ -n "$p" && -n "$k" ]] || die "usage: wallpaper config set-key <wallhaven|unsplash|pexels> <key>"
+      case "$p" in
+        wallhaven)        config_set WALLHAVEN_API_KEY "$k" ;;
+        unsplash)         config_set UNSPLASH_API_KEY  "$k" ;;
+        pexels)           config_set PEXELS_API_KEY    "$k" ;;
+        huggingface|hf)   config_set HF_API_KEY        "$k" ;;
+        *) die "unknown provider: $p (wallhaven|unsplash|pexels|huggingface)" ;;
+      esac
+      info "Saved $p API key to $CONFIG_FILE" ;;
+    keys)
+      command -v gum >/dev/null 2>&1 || die "gum not installed (needed for interactive key entry)"
+      echo "Leave blank to keep the current value. Keys are stored in $CONFIG_FILE (chmod 600)."
+      local v
+      v=$(gum input --password --placeholder "Wallhaven API key (optional, for NSFW/favorites)") || true
+      [[ -n "$v" ]] && config_set WALLHAVEN_API_KEY "$v"
+      v=$(gum input --password --placeholder "Unsplash Access Key") || true
+      [[ -n "$v" ]] && config_set UNSPLASH_API_KEY "$v"
+      v=$(gum input --password --placeholder "Pexels API key") || true
+      [[ -n "$v" ]] && config_set PEXELS_API_KEY "$v"
+      v=$(gum input --password --placeholder "Hugging Face token (for AI generation)") || true
+      [[ -n "$v" ]] && config_set HF_API_KEY "$v"
+      info "API keys updated." ;;
+    set-model)
+      local m="${1:-}"; [[ -n "$m" ]] || die "usage: wallpaper config set-model <hf-model-id>"
+      config_set HF_MODEL "$m"; info "AI model set to $m" ;;
+    *) die "usage: wallpaper config {show|keys|set-key <provider> <key>|set-model <model>|path}" ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# Resolution auto-detect
+# ----------------------------------------------------------------------------
+detect_res() {
+  [[ -n "$ATLEAST" ]] && return
+  if command -v hyprctl >/dev/null 2>&1; then
+    ATLEAST=$(hyprctl monitors -j 2>/dev/null \
+      | jq -r 'max_by(.width*.height) | "\(.width)x\(.height)"' 2>/dev/null) || true
+  fi
+  [[ "$ATLEAST" == *x* ]] || ATLEAST="1920x1080"
+}
+
+# ----------------------------------------------------------------------------
+# Apply a wallpaper (cross-platform)
+# ----------------------------------------------------------------------------
+apply() {
+  local img="$1"
+  [[ -f "$img" ]] || die "not a file: $img"
+  img="$(realpath "$img")"
+  case "$(uname -s)" in
+    Linux)
+      if command -v omarchy-theme-bg-set >/dev/null 2>&1; then
+        omarchy-theme-bg-set "$img"
+      elif command -v swaybg >/dev/null 2>&1; then
+        local link="$HOME/.config/omarchy/current/background"
+        mkdir -p "$(dirname "$link")"
+        ln -nsf "$img" "$link"
+        pkill -x swaybg 2>/dev/null || true
+        setsid swaybg -i "$img" -m fill >/dev/null 2>&1 &
+      elif command -v gsettings >/dev/null 2>&1; then
+        gsettings set org.gnome.desktop.background picture-uri "file://$img"
+        gsettings set org.gnome.desktop.background picture-uri-dark "file://$img" 2>/dev/null || true
+      else
+        die "no supported wallpaper setter found (omarchy, swaybg, or gsettings)"
+      fi ;;
+    Darwin)
+      osascript -e 'tell application "System Events" to tell every desktop to set picture to "'"$img"'"' \
+        || die "failed to set wallpaper via osascript" ;;
+    MINGW*|MSYS*|CYGWIN*)
+      local winpath; winpath="$(cygpath -w "$img")"
+      powershell.exe -NoProfile -Command "
+        Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class WP { [DllImport(\"user32.dll\")] public static extern int SystemParametersInfo(int a, int b, string c, int d); }';
+        [WP]::SystemParametersInfo(20, 0, '$winpath', 3)" >/dev/null \
+        || die "failed to set wallpaper via PowerShell" ;;
+    *) die "unsupported platform: $(uname -s)" ;;
+  esac
+  info "Wallpaper set: ${c_dim}$img${c_rst}"
+  notify "Set $(basename "$img")"
+}
+
+# ----------------------------------------------------------------------------
+# Terminal preview of a single image
+# ----------------------------------------------------------------------------
+cmd_preview() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || die "usage: wallpaper preview <path-to-image>"
+  if command -v chafa >/dev/null 2>&1; then
+    chafa -f symbols --polite on "$f"
+  elif command -v imv >/dev/null 2>&1; then
+    warn "chafa not installed — opening in imv instead (install chafa for inline previews)"
+    setsid imv "$f" >/dev/null 2>&1 &
+  else
+    die "install chafa (inline) or imv (window) to preview images"
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# Interactive picker.  TSV columns: id \t label \t full_url \t thumb_url
+# Echoes the chosen "id\tlabel\tfull_url\tthumb_url" line, empty if cancelled.
+# ----------------------------------------------------------------------------
+pick() {
+  local tsv="$1"
+  [[ -s "$tsv" ]] || die "no results"
+  local thumbs; thumbs="$(mktmp -d)"
+
+  local have_chafa=0
+  command -v chafa >/dev/null 2>&1 && have_chafa=1
+  if [[ $PREVIEW -eq 1 && $have_chafa -eq 1 ]]; then
+    info "Fetching thumbnails…"
+    while IFS=$'\t' read -r id _ _ thumb; do
+      printf '%s\t%s\n' "$thumb" "$thumbs/$id.img"
+    done <"$tsv" \
+      | xargs -P 8 -d '\n' -n 1 sh -c 'set -- $0; curl -fsSL --max-time 20 -o "$2" "$1" 2>/dev/null || true' 2>/dev/null || true
+  elif [[ $PREVIEW -eq 1 ]]; then
+    warn "chafa not installed — list only. Inline previews:  sudo pacman -S chafa"
+  fi
+
+  local prevcmd='(no preview — install chafa)'
+  [[ $have_chafa -eq 1 ]] && prevcmd='f="'"$thumbs"'/{1}.img"; [ -f "$f" ] && chafa -f symbols --polite on -s "${FZF_PREVIEW_COLUMNS:-40}x${FZF_PREVIEW_LINES:-20}" "$f" || echo "(loading…)"'
+
+  local chosen
+  chosen=$(awk -F'\t' '{printf "%s\t%s\n",$1,$2}' "$tsv" \
+    | fzf --with-nth=2.. --delimiter='\t' --ansi \
+          --preview="$prevcmd" --preview-window='right,55%,border-left' \
+          --prompt='wallpaper> ' \
+          --header='Enter: set · Ctrl-O: open full image · Esc: cancel' \
+          --bind="ctrl-o:execute-silent(setsid imv '$thumbs/{1}.img' >/dev/null 2>&1 &)") || return 1
+  local cid=${chosen%%$'\t'*}
+  grep -P "^${cid}\t" "$tsv" | head -n1 || return 1
+}
+
+download_full() {  # url id
+  local url="$1" id="$2"
+  mkdir -p "$LIB_DIR"
+  local ext="${url##*.}"; ext="${ext%%\?*}"
+  case "$ext" in jpg|jpeg|png|webp) ;; *) ext="jpg" ;; esac
+  local out="$LIB_DIR/${SOURCE}-${id}.${ext}"
+  info "Downloading full resolution…"
+  curl -fsSL --max-time 60 -o "$out" "$url" || die "download failed"
+  printf '%s\n' "$out"
+}
+
+# ----------------------------------------------------------------------------
+# Providers -> TSV (id \t label \t full_url \t thumb_url)
+# ----------------------------------------------------------------------------
+fetch_wallhaven() {
+  local query="$*"
+  detect_res
+  local hdr=()
+  [[ -n "${WALLHAVEN_API_KEY:-}" ]] && hdr=(-H "X-API-Key: $WALLHAVEN_API_KEY")
+  info "Searching Wallhaven for '${query:-random}' (≥${ATLEAST}, sort=$SORTING)…"
+  curl -fsSL "${hdr[@]}" -G "https://wallhaven.cc/api/v1/search" \
+    --data-urlencode "q=$query" \
+    --data-urlencode "categories=$CATEGORIES" \
+    --data-urlencode "purity=$PURITY" \
+    --data-urlencode "sorting=$SORTING" \
+    --data-urlencode "atleast=$ATLEAST" \
+    | jq -r --argjson lim "$LIMIT" '
+        .data[:$lim][]
+        | [ .id,
+            "\(.resolution)  \(.category)  ♥\(.favorites)",
+            .path,
+            (.thumbs.large // .thumbs.original)
+          ] | @tsv'
+}
+
+fetch_unsplash() {
+  [[ -n "${UNSPLASH_API_KEY:-}" ]] || die "no Unsplash key — run: wallpaper config keys"
+  local query="$*"
+  info "Searching Unsplash for '$query'…"
+  curl -fsSL -H "Authorization: Client-ID $UNSPLASH_API_KEY" -G \
+    "https://api.unsplash.com/search/photos" \
+    --data-urlencode "query=$query" --data-urlencode "per_page=$LIMIT" \
+    --data-urlencode "orientation=landscape" \
+    | jq -r '.results[] | [ .id, "\(.width)x\(.height)  @\(.user.username)", .urls.full, .urls.small ] | @tsv'
+}
+
+fetch_pexels() {
+  [[ -n "${PEXELS_API_KEY:-}" ]] || die "no Pexels key — run: wallpaper config keys"
+  local query="$*"
+  info "Searching Pexels for '$query'…"
+  curl -fsSL -H "Authorization: $PEXELS_API_KEY" -G \
+    "https://api.pexels.com/v1/search" \
+    --data-urlencode "query=$query" --data-urlencode "per_page=$LIMIT" \
+    --data-urlencode "orientation=landscape" \
+    | jq -r '.photos[] | [ (.id|tostring), "\(.width)x\(.height)  @\(.photographer)", .src.original, .src.medium ] | @tsv'
+}
+
+fetch() {
+  case "$SOURCE" in
+    wallhaven) fetch_wallhaven "$@" ;;
+    unsplash)  fetch_unsplash  "$@" ;;
+    pexels)    fetch_pexels    "$@" ;;
+    *) die "unknown source: $SOURCE (wallhaven|unsplash|pexels)" ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# AI image generation (Hugging Face Inference API — open models, free tier)
+# ----------------------------------------------------------------------------
+cmd_generate() {
+  need curl; need jq
+  [[ -n "${HF_API_KEY:-}" ]] || die "no Hugging Face token — grab a free one at https://huggingface.co/settings/tokens then run: wallpaper config keys"
+  local prompt="$*"
+  [[ -n "$prompt" ]] || die "usage: wallpaper generate <prompt...>   (e.g. wallpaper generate misty pine forest at dawn)"
+
+  # Size the image to your screen; diffusion models want multiples of 16.
+  detect_res
+  local w="${ATLEAST%x*}" h="${ATLEAST#*x}"
+  w=$(( w / 16 * 16 )); h=$(( h / 16 * 16 ))
+
+  mkdir -p "$LIB_DIR"
+  local slug out
+  slug=$(tr -cs 'a-zA-Z0-9' '-' <<<"$prompt" | cut -c1-40 | sed 's/-*$//')
+  out="$LIB_DIR/ai-${slug}-$(date +%s).png"
+
+  info "Generating ${w}x${h} with ${c_bold}$HF_MODEL${c_rst} — this can take 10-60s…"
+  local body http
+  body=$(jq -n --arg p "$prompt" --argjson w "$w" --argjson h "$h" \
+    '{inputs: $p, parameters: {width: $w, height: $h}}')
+  http=$(curl -sSL -w '%{http_code}' -o "$out" --max-time 300 \
+    -X POST "https://router.huggingface.co/hf-inference/models/$HF_MODEL" \
+    -H "Authorization: Bearer $HF_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$body") || die "request failed"
+
+  if [[ "$http" != "200" ]]; then
+    local err; err=$(jq -r '.error // empty' "$out" 2>/dev/null | head -c 300)
+    rm -f "$out"
+    [[ "$http" == "503" ]] && die "model is cold-loading on Hugging Face (HTTP 503) — retry in ~30s"
+    die "generation failed (HTTP $http)${err:+: $err}"
+  fi
+  # Sanity check we actually got an image, not a JSON error with HTTP 200
+  file "$out" 2>/dev/null | grep -qiE 'image|PNG|JPEG|WebP' || { rm -f "$out"; die "response was not an image"; }
+
+  info "Saved: ${c_dim}$out${c_rst}"
+  apply "$out"
+}
+
+# ----------------------------------------------------------------------------
+# Browse & set commands
+# ----------------------------------------------------------------------------
+cmd_search() {
+  need curl; need jq; need fzf
+  local tsv; tsv="$(mktmp)"
+  fetch "$@" >"$tsv"
+  [[ -s "$tsv" ]] || die "no results (try a broader query, or adjust --categories/--purity)"
+  local line; line="$(pick "$tsv")" || { info "cancelled"; return 0; }
+  [[ -n "$line" ]] || { info "cancelled"; return 0; }
+  local id full; id=$(cut -f1 <<<"$line"); full=$(cut -f3 <<<"$line")
+  apply "$(download_full "$full" "$id")"
+}
+
+cmd_random() {
+  need curl; need jq
+  SORTING="random"; LIMIT=1
+  local tsv; tsv="$(mktmp)"
+  fetch "$@" >"$tsv"
+  [[ -s "$tsv" ]] || die "no results"
+  local line; line="$(head -n1 "$tsv")"
+  local id full; id=$(cut -f1 <<<"$line"); full=$(cut -f3 <<<"$line")
+  apply "$(download_full "$full" "$id")"
+}
+
+cmd_library() {
+  need fzf
+  [[ -d "$LIB_DIR" ]] || die "library empty: $LIB_DIR"
+  mapfile -t files < <(find "$LIB_DIR" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | sort)
+  ((${#files[@]})) || die "no images in $LIB_DIR"
+  local sel prev='(install chafa for previews)'
+  command -v chafa >/dev/null 2>&1 && prev='chafa -f symbols --polite on -s "${FZF_PREVIEW_COLUMNS:-40}x${FZF_PREVIEW_LINES:-20}" {}'
+  sel=$(printf '%s\n' "${files[@]}" \
+    | fzf --prompt='library> ' --with-nth=-1 --delimiter=/ \
+          --preview="$prev" --preview-window='right,55%,border-left' \
+          --header='Enter: set · Ctrl-O: open full image' \
+          --bind='ctrl-o:execute-silent(setsid imv {} >/dev/null 2>&1 &)') \
+    || { info "cancelled"; return 0; }
+  apply "$sel"
+}
+
+cmd_current() {
+  local link="$HOME/.config/omarchy/current/background"
+  if [[ -L "$link" ]]; then readlink -f "$link"; else warn "no current background set"; fi
+}
+
+# ----------------------------------------------------------------------------
+# Auto-change (systemd user timer)
+# ----------------------------------------------------------------------------
+SELF="$(command -v wallpaper 2>/dev/null || readlink -f "$0")"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SVC="wallpaper-auto.service"
+TMR="wallpaper-auto.timer"
+
+auto_oncalendar() {  # maps keyword -> systemd OnCalendar
+  case "$1" in
+    hourly) echo "hourly" ;;
+    daily)  echo "daily" ;;
+    weekly) echo "weekly" ;;
+    *)      echo "$1" ;;   # custom: pass through as OnCalendar
+  esac
+}
+
+auto_enable() {
+  local schedule="$1"; shift || true
+  local query="$*"
+  local oncal; oncal="$(auto_oncalendar "$schedule")"
+
+  # Validate the schedule expression
+  systemd-analyze calendar "$oncal" >/dev/null 2>&1 \
+    || die "invalid schedule '$oncal' (see: man systemd.time — e.g. 'daily', '*-*-* 08:00:00')"
+
+  # Persist what to fetch
+  config_set AUTO_SOURCE     "$SOURCE"
+  config_set AUTO_QUERY      "$query"
+  config_set AUTO_CATEGORIES "$CATEGORIES"
+
+  mkdir -p "$UNIT_DIR"
+  cat >"$UNIT_DIR/$SVC" <<EOF
+[Unit]
+Description=Change desktop wallpaper (wallpaper-cli)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.local/share/omarchy/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$SELF _auto_run
+EOF
+
+  cat >"$UNIT_DIR/$TMR" <<EOF
+[Unit]
+Description=Schedule automatic wallpaper changes (wallpaper-cli)
+
+[Timer]
+OnCalendar=$oncal
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$TMR" >/dev/null 2>&1
+  info "Auto-change enabled: ${c_bold}$schedule${c_rst} (${oncal})"
+  [[ -n "$query" ]] && info "Query: '$query'  ·  categories: $CATEGORIES  ·  source: $SOURCE" \
+                    || info "Fully random  ·  categories: $CATEGORIES  ·  source: $SOURCE"
+  auto_status
+}
+
+auto_disable() {
+  systemctl --user disable --now "$TMR" >/dev/null 2>&1 || true
+  info "Auto-change disabled."
+}
+
+auto_status() {
+  if systemctl --user is-enabled "$TMR" >/dev/null 2>&1; then
+    echo "${c_bold}Auto-change: ${c_grn}on${c_rst}"
+    systemctl --user list-timers "$TMR" --no-pager 2>/dev/null | sed -n '1,2p' || true
+  else
+    echo "${c_bold}Auto-change: ${c_yel}off${c_rst}   (enable with: wallpaper auto daily)"
+  fi
+}
+
+# Internal: executed by the systemd service on each tick.
+_auto_run() {
+  SOURCE="${AUTO_SOURCE:-wallhaven}"
+  CATEGORIES="${AUTO_CATEGORIES:-111}"
+  PREVIEW=0
+  cmd_random ${AUTO_QUERY:+$AUTO_QUERY}
+}
+
+cmd_auto() {
+  command -v systemctl >/dev/null 2>&1 \
+    || die "auto-change needs systemd (Linux). On macOS/Windows use launchd/Task Scheduler to run: wallpaper random"
+  local sub="${1:-status}"; [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    hourly|daily|weekly) auto_enable "$sub" "$@" ;;
+    custom)
+      local expr="${1:-}"; [[ -n "$expr" ]] || die 'usage: wallpaper auto custom "<OnCalendar expr>" [query]'
+      shift || true; auto_enable "$expr" "$@" ;;
+    off|disable|stop) auto_disable ;;
+    status) auto_status ;;
+    *) die "usage: wallpaper auto {hourly|daily|weekly|custom <expr>|status|off} [query]" ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# Arg parsing
+# ----------------------------------------------------------------------------
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s|--source)     SOURCE="$2"; shift 2 ;;
+    -c|--categories) CATEGORIES="$2"; shift 2 ;;
+    -p|--purity)     PURITY="$2"; shift 2 ;;
+    --sort)          SORTING="$2"; shift 2 ;;
+    -n|--limit)      LIMIT="$2"; shift 2 ;;
+    --atleast)       ATLEAST="$2"; shift 2 ;;
+    --model)         HF_MODEL="$2"; shift 2 ;;
+    --no-preview)    PREVIEW=0; shift ;;
+    -v|--version)    echo "wallpaper $VERSION"; exit 0 ;;
+    -h|--help|help)  usage; exit 0 ;;
+    --) shift; while [[ $# -gt 0 ]]; do POSITIONAL+=("$1"); shift; done ;;
+    -*) die "unknown option: $1" ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+set -- "${POSITIONAL[@]:-}"
+
+cmd="${1:-}"; [[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+  ""|search)   [[ -n "${1:-}" ]] || { read -rp "Search wallpapers: " q; set -- $q; }; cmd_search "$@" ;;
+  random)      cmd_random "$@" ;;
+  library|lib) cmd_library ;;
+  set)         [[ -n "${1:-}" ]] || die "usage: wallpaper set <path>"; apply "$1" ;;
+  next)        command -v omarchy-theme-bg-next >/dev/null && omarchy-theme-bg-next || die "omarchy not found" ;;
+  current)     cmd_current ;;
+  preview)     cmd_preview "${1:-}" ;;
+  generate|gen) cmd_generate "$@" ;;
+  config)      cmd_config "$@" ;;
+  version)     echo "wallpaper $VERSION" ;;
+  auto)        cmd_auto "$@" ;;
+  _auto_run)   _auto_run ;;
+  *)           cmd_search "$cmd" "$@" ;;   # `wallpaper mountains` → search
+esac

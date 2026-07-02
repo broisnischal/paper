@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n bin/wallpaper && bash -n install.sh
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning bin/wallpaper install.sh
+      - name: Smoke test (help, version)
+        run: |
+          chmod +x bin/wallpaper
+          ./bin/wallpaper --version
+          ./bin/wallpaper --help 2>&1 | head -5
