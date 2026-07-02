@@ -9,7 +9,6 @@ set -euo pipefail
 REPO="broisnischal/paper"
 RAW_URL="https://raw.githubusercontent.com/$REPO/master/bin/paper"
 BIN_DST="$HOME/.local/bin/paper"
-TMR="paper-auto.timer"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   for unit in paper-auto wallpaper-auto; do
