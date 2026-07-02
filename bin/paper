@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wallpaper — fetch & set desktop wallpapers for Omarchy / Hyprland from the
+# paper — fetch & set desktop wallpapers for Omarchy / Hyprland from the
 # best online providers, with an interactive terminal picker (image previews),
 # an API-key manager, and a systemd-based scheduler for automatic changes.
 #
@@ -8,28 +8,34 @@
 #   Preview : chafa renders thumbnails inline; imv opens the full image (Ctrl-O)
 #   Applies : via `omarchy theme bg set` (swaybg + current/background symlink)
 #   Library : full-res downloads kept in ~/Pictures/Wallpapers
-#   Auto    : `wallpaper auto daily|hourly|weekly|custom <expr>` (systemd timer)
+#   Auto    : `paper auto daily|hourly|weekly|custom <expr>` (systemd timer)
 #
-# Config & keys live in ~/.config/wallpaper/config — manage with `wallpaper config`.
+# Config & keys live in ~/.config/paper/config — manage with `paper config`.
 #
-# https://github.com/  (your repo)   MIT License
+# https://github.com/broisnischal/paper   MIT License
 
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 
 # ----------------------------------------------------------------------------
 # Config file (API keys + auto-change settings)
 # ----------------------------------------------------------------------------
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wallpaper"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/paper"
 CONFIG_FILE="$CONFIG_DIR/config"
+# migrate config from the pre-rename wallpaper-cli location
+OLD_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/wallpaper/config"
+if [[ ! -f "$CONFIG_FILE" && -f "$OLD_CONFIG" ]]; then
+  mkdir -p "$CONFIG_DIR"
+  cp "$OLD_CONFIG" "$CONFIG_FILE" && chmod 600 "$CONFIG_FILE"
+fi
 # shellcheck source=/dev/null
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 # ----------------------------------------------------------------------------
 # Defaults (config file / env can override the *_API_KEY and AUTO_* values)
 # ----------------------------------------------------------------------------
-LIB_DIR="${WALLPAPER_DIR:-$HOME/Pictures/Wallpapers}"
+LIB_DIR="${PAPER_DIR:-${WALLPAPER_DIR:-$HOME/Pictures/Wallpapers}}"
 SOURCE="wallhaven"
 CATEGORIES="111"   # general / anime / people   (wallhaven bitmask)
 PURITY="100"       # sfw only
@@ -56,37 +62,37 @@ notify() { command -v notify-send >/dev/null 2>&1 && notify-send -t 2500 "Wallpa
 
 usage() {
   cat >&2 <<EOF
-${c_bold}wallpaper${c_rst} — fetch & set wallpapers for Omarchy from the best providers
+${c_bold}paper${c_rst} — fetch & set wallpapers for Omarchy from the best providers
 
 ${c_bold}BROWSE & SET${c_rst}
-  wallpaper [search] <query...>     search a provider, pick with preview, set
-  wallpaper                         prompt for a search term
-  wallpaper random [query...]       grab one random match and set it now
-  wallpaper library                 re-pick from wallpapers you've downloaded
-  wallpaper set <path>              set a local image file
-  wallpaper next                    cycle bg (wraps 'omarchy theme bg next')
-  wallpaper current                 show the current wallpaper path
-  wallpaper preview <path>          render an image in the terminal (chafa/imv)
+  paper [search] <query...>     search a provider, pick with preview, set
+  paper                         prompt for a search term
+  paper random [query...]       grab one random match and set it now
+  paper library                 re-pick from wallpapers you've downloaded
+  paper set <path>              set a local image file
+  paper next                    cycle bg (wraps 'omarchy theme bg next')
+  paper current                 show the current wallpaper path
+  paper preview <path>          render an image in the terminal (chafa/imv)
 
 ${c_bold}AI GENERATION (Hugging Face open models)${c_rst}
-  wallpaper generate <prompt...>    generate a wallpaper with an open model
+  paper generate <prompt...>    generate a wallpaper with an open model
      default model: black-forest-labs/FLUX.1-schnell (override: --model or config)
      needs a free HF token: https://huggingface.co/settings/tokens
 
 ${c_bold}API KEYS / CONFIG${c_rst}
-  wallpaper config                  show current config (keys masked)
-  wallpaper config keys             interactively enter API keys
-  wallpaper config set-key <provider> <key>   wallhaven|unsplash|pexels|huggingface
-  wallpaper config set-model <id>   set the AI generation model
-  wallpaper config path             print the config file path
+  paper config                  show current config (keys masked)
+  paper config keys             interactively enter API keys
+  paper config set-key <provider> <key>   wallhaven|unsplash|pexels|huggingface
+  paper config set-model <id>   set the AI generation model
+  paper config path             print the config file path
 
 ${c_bold}AUTO-CHANGE (systemd timer)${c_rst}
-  wallpaper auto hourly  [query]    change every hour
-  wallpaper auto daily   [query]    change every day
-  wallpaper auto weekly  [query]    change every week
-  wallpaper auto custom "<expr>" [query]   custom schedule (systemd OnCalendar)
-  wallpaper auto status             show schedule + next run
-  wallpaper auto off                stop automatic changes
+  paper auto hourly  [query]    change every hour
+  paper auto daily   [query]    change every day
+  paper auto weekly  [query]    change every week
+  paper auto custom "<expr>" [query]   custom schedule (systemd OnCalendar)
+  paper auto status             show schedule + next run
+  paper auto off                stop automatic changes
      (add --categories 100 for category-based; omit query for fully random)
 
 ${c_bold}OPTIONS${c_rst}
@@ -102,13 +108,13 @@ ${c_bold}OPTIONS${c_rst}
   -h, --help             this help
 
 ${c_bold}EXAMPLES${c_rst}
-  wallpaper mountains at night
-  wallpaper --sort toplist --categories 100 minimal
-  wallpaper random cyberpunk city
-  wallpaper generate a cozy cabin in snowy mountains, golden hour
-  wallpaper auto daily nature
-  wallpaper auto custom "*-*-* 08,20:00:00"      # 8am and 8pm every day
-  wallpaper config keys
+  paper mountains at night
+  paper --sort toplist --categories 100 minimal
+  paper random cyberpunk city
+  paper generate a cozy cabin in snowy mountains, golden hour
+  paper auto daily nature
+  paper auto custom "*-*-* 08,20:00:00"      # 8am and 8pm every day
+  paper config keys
 EOF
 }
 
@@ -144,7 +150,7 @@ cmd_config() {
       ;;
     set-key)
       local p="${1:-}" k="${2:-}"
-      [[ -n "$p" && -n "$k" ]] || die "usage: wallpaper config set-key <wallhaven|unsplash|pexels> <key>"
+      [[ -n "$p" && -n "$k" ]] || die "usage: paper config set-key <wallhaven|unsplash|pexels> <key>"
       case "$p" in
         wallhaven)        config_set WALLHAVEN_API_KEY "$k" ;;
         unsplash)         config_set UNSPLASH_API_KEY  "$k" ;;
@@ -167,9 +173,9 @@ cmd_config() {
       [[ -n "$v" ]] && config_set HF_API_KEY "$v"
       info "API keys updated." ;;
     set-model)
-      local m="${1:-}"; [[ -n "$m" ]] || die "usage: wallpaper config set-model <hf-model-id>"
+      local m="${1:-}"; [[ -n "$m" ]] || die "usage: paper config set-model <hf-model-id>"
       config_set HF_MODEL "$m"; info "AI model set to $m" ;;
-    *) die "usage: wallpaper config {show|keys|set-key <provider> <key>|set-model <model>|path}" ;;
+    *) die "usage: paper config {show|keys|set-key <provider> <key>|set-model <model>|path}" ;;
   esac
 }
 
@@ -228,7 +234,7 @@ apply() {
 # ----------------------------------------------------------------------------
 cmd_preview() {
   local f="${1:-}"
-  [[ -f "$f" ]] || die "usage: wallpaper preview <path-to-image>"
+  [[ -f "$f" ]] || die "usage: paper preview <path-to-image>"
   if command -v chafa >/dev/null 2>&1; then
     chafa -f symbols --polite on "$f"
   elif command -v imv >/dev/null 2>&1; then
@@ -278,7 +284,7 @@ pick() {
   chosen=$(awk -F'\t' -v t="$thumbs" '{printf "%s/%s.img\t%s\t%s\n", t, $1, $1, $2}' "$tsv" \
     | fzf "${FZF_STYLE[@]}" --with-nth=3.. --delimiter='\t' \
           --preview="$prevcmd" --preview-window='right,60%,border-rounded' \
-          --prompt='  wallpaper ❯ ' \
+          --prompt='  paper ❯ ' \
           --header='enter set · ctrl-o open full · esc cancel' \
           --bind='ctrl-o:execute-silent(setsid imv {1} >/dev/null 2>&1 &)') || return 1
   local cid; cid=$(cut -f2 <<<"$chosen")
@@ -321,7 +327,7 @@ fetch_wallhaven() {
 }
 
 fetch_unsplash() {
-  [[ -n "${UNSPLASH_API_KEY:-}" ]] || die "no Unsplash key — run: wallpaper config keys"
+  [[ -n "${UNSPLASH_API_KEY:-}" ]] || die "no Unsplash key — run: paper config keys"
   local query="$*"
   info "Searching Unsplash for '$query'…"
   curl -fsSL -H "Authorization: Client-ID $UNSPLASH_API_KEY" -G \
@@ -332,7 +338,7 @@ fetch_unsplash() {
 }
 
 fetch_pexels() {
-  [[ -n "${PEXELS_API_KEY:-}" ]] || die "no Pexels key — run: wallpaper config keys"
+  [[ -n "${PEXELS_API_KEY:-}" ]] || die "no Pexels key — run: paper config keys"
   local query="$*"
   info "Searching Pexels for '$query'…"
   curl -fsSL -H "Authorization: $PEXELS_API_KEY" -G \
@@ -356,9 +362,9 @@ fetch() {
 # ----------------------------------------------------------------------------
 cmd_generate() {
   need curl; need jq
-  [[ -n "${HF_API_KEY:-}" ]] || die "no Hugging Face token — grab a free one at https://huggingface.co/settings/tokens then run: wallpaper config keys"
+  [[ -n "${HF_API_KEY:-}" ]] || die "no Hugging Face token — grab a free one at https://huggingface.co/settings/tokens then run: paper config keys"
   local prompt="$*"
-  [[ -n "$prompt" ]] || die "usage: wallpaper generate <prompt...>   (e.g. wallpaper generate misty pine forest at dawn)"
+  [[ -n "$prompt" ]] || die "usage: paper generate <prompt...>   (e.g. paper generate misty pine forest at dawn)"
 
   # Size the image to your screen; diffusion models want multiples of 16.
   detect_res
@@ -443,10 +449,10 @@ cmd_current() {
 # ----------------------------------------------------------------------------
 # Auto-change (systemd user timer)
 # ----------------------------------------------------------------------------
-SELF="$(command -v wallpaper 2>/dev/null || readlink -f "$0")"
+SELF="$(command -v paper 2>/dev/null || readlink -f "$0")"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-SVC="wallpaper-auto.service"
-TMR="wallpaper-auto.timer"
+SVC="paper-auto.service"
+TMR="paper-auto.timer"
 
 auto_oncalendar() {  # maps keyword -> systemd OnCalendar
   case "$1" in
@@ -474,7 +480,7 @@ auto_enable() {
   mkdir -p "$UNIT_DIR"
   cat >"$UNIT_DIR/$SVC" <<EOF
 [Unit]
-Description=Change desktop wallpaper (wallpaper-cli)
+Description=Change desktop wallpaper (paper)
 After=graphical-session.target
 PartOf=graphical-session.target
 
@@ -486,7 +492,7 @@ EOF
 
   cat >"$UNIT_DIR/$TMR" <<EOF
 [Unit]
-Description=Schedule automatic wallpaper changes (wallpaper-cli)
+Description=Schedule automatic wallpaper changes (paper)
 
 [Timer]
 OnCalendar=$oncal
@@ -514,7 +520,7 @@ auto_status() {
     echo "${c_bold}Auto-change: ${c_grn}on${c_rst}"
     systemctl --user list-timers "$TMR" --no-pager 2>/dev/null | sed -n '1,2p' || true
   else
-    echo "${c_bold}Auto-change: ${c_yel}off${c_rst}   (enable with: wallpaper auto daily)"
+    echo "${c_bold}Auto-change: ${c_yel}off${c_rst}   (enable with: paper auto daily)"
   fi
 }
 
@@ -528,16 +534,16 @@ _auto_run() {
 
 cmd_auto() {
   command -v systemctl >/dev/null 2>&1 \
-    || die "auto-change needs systemd (Linux). On macOS/Windows use launchd/Task Scheduler to run: wallpaper random"
+    || die "auto-change needs systemd (Linux). On macOS/Windows use launchd/Task Scheduler to run: paper random"
   local sub="${1:-status}"; [[ $# -gt 0 ]] && shift || true
   case "$sub" in
     hourly|daily|weekly) auto_enable "$sub" "$@" ;;
     custom)
-      local expr="${1:-}"; [[ -n "$expr" ]] || die 'usage: wallpaper auto custom "<OnCalendar expr>" [query]'
+      local expr="${1:-}"; [[ -n "$expr" ]] || die 'usage: paper auto custom "<OnCalendar expr>" [query]'
       shift || true; auto_enable "$expr" "$@" ;;
     off|disable|stop) auto_disable ;;
     status) auto_status ;;
-    *) die "usage: wallpaper auto {hourly|daily|weekly|custom <expr>|status|off} [query]" ;;
+    *) die "usage: paper auto {hourly|daily|weekly|custom <expr>|status|off} [query]" ;;
   esac
 }
 
@@ -555,7 +561,7 @@ while [[ $# -gt 0 ]]; do
     --atleast)       ATLEAST="$2"; shift 2 ;;
     --model)         HF_MODEL="$2"; shift 2 ;;
     --no-preview)    PREVIEW=0; shift ;;
-    -v|--version)    echo "wallpaper $VERSION"; exit 0 ;;
+    -v|--version)    echo "paper $VERSION"; exit 0 ;;
     -h|--help|help)  usage; exit 0 ;;
     --) shift; while [[ $# -gt 0 ]]; do POSITIONAL+=("$1"); shift; done ;;
     -*) die "unknown option: $1" ;;
@@ -570,14 +576,14 @@ case "$cmd" in
   ""|search)   [[ -n "${1:-}" ]] || { read -rp "Search wallpapers: " q; set -- $q; }; cmd_search "$@" ;;
   random)      cmd_random "$@" ;;
   library|lib) cmd_library ;;
-  set)         [[ -n "${1:-}" ]] || die "usage: wallpaper set <path>"; apply "$1" ;;
+  set)         [[ -n "${1:-}" ]] || die "usage: paper set <path>"; apply "$1" ;;
   next)        command -v omarchy-theme-bg-next >/dev/null && omarchy-theme-bg-next || die "omarchy not found" ;;
   current)     cmd_current ;;
   preview)     cmd_preview "${1:-}" ;;
   generate|gen) cmd_generate "$@" ;;
   config)      cmd_config "$@" ;;
-  version)     echo "wallpaper $VERSION" ;;
+  version)     echo "paper $VERSION" ;;
   auto)        cmd_auto "$@" ;;
   _auto_run)   _auto_run ;;
-  *)           cmd_search "$cmd" "$@" ;;   # `wallpaper mountains` → search
+  *)           cmd_search "$cmd" "$@" ;;   # `paper mountains` → search
 esac

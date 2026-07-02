@@ -1,33 +1,56 @@
 #!/usr/bin/env bash
-# Installer for wallpaper-cli — symlinks bin/wallpaper into ~/.local/bin.
+# Installer for paper — installs the `paper` CLI into ~/.local/bin.
+#
+# From a clone / extracted release:   ./install.sh
+# Straight from the internet:
+#   curl -fsSL https://raw.githubusercontent.com/broisnischal/paper/master/install.sh | bash
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="$REPO_DIR/bin/wallpaper"
-BIN_DST="$HOME/.local/bin/wallpaper"
-TMR="wallpaper-auto.timer"
+REPO="broisnischal/paper"
+RAW_URL="https://raw.githubusercontent.com/$REPO/master/bin/paper"
+BIN_DST="$HOME/.local/bin/paper"
+TMR="paper-auto.timer"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-  systemctl --user disable --now "$TMR" >/dev/null 2>&1 || true
-  rm -f "$HOME/.config/systemd/user/wallpaper-auto.service" \
-        "$HOME/.config/systemd/user/$TMR"
+  for unit in paper-auto wallpaper-auto; do
+    systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || true
+    rm -f "$HOME/.config/systemd/user/$unit.service" \
+          "$HOME/.config/systemd/user/$unit.timer"
+  done
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-  [[ -L "$BIN_DST" ]] && rm -f "$BIN_DST"
-  echo "Uninstalled. Config (~/.config/wallpaper) and wallpapers were kept."
+  rm -f "$BIN_DST" "$HOME/.local/bin/wallpaper"
+  echo "Uninstalled. Config (~/.config/paper) and wallpapers were kept."
   exit 0
 fi
 
 mkdir -p "$HOME/.local/bin"
-chmod +x "$BIN_SRC"
-ln -sfn "$BIN_SRC" "$BIN_DST"
-echo "Installed: $BIN_DST -> $BIN_SRC"
+
+# Local checkout (or extracted release archive) → symlink; otherwise download.
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || true)"
+if [[ -n "$SRC_DIR" && -f "$SRC_DIR/bin/paper" ]]; then
+  chmod +x "$SRC_DIR/bin/paper"
+  ln -sfn "$SRC_DIR/bin/paper" "$BIN_DST"
+  echo "Installed: $BIN_DST -> $SRC_DIR/bin/paper"
+else
+  echo "Downloading paper from github.com/$REPO…"
+  curl -fsSL "$RAW_URL" -o "$BIN_DST"
+  chmod +x "$BIN_DST"
+  echo "Installed: $BIN_DST"
+fi
+
+# Clean up the pre-rename symlink if it points at this tool
+[[ -L "$HOME/.local/bin/wallpaper" ]] && rm -f "$HOME/.local/bin/wallpaper"
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) echo "NOTE: add ~/.local/bin to your PATH." ;;
 esac
 
-command -v chafa >/dev/null 2>&1 || \
-  echo "TIP: install chafa for inline image previews:  sudo pacman -S chafa"
+if ! command -v chafa >/dev/null 2>&1; then
+  case "$(uname -s)" in
+    Darwin) echo "TIP: install deps for previews & picking:  brew install jq fzf chafa" ;;
+    *)      echo "TIP: install chafa for inline image previews:  sudo pacman -S chafa" ;;
+  esac
+fi
 
-echo "Done. Try:  wallpaper mountains"
+echo "Done. Try:  paper mountains"

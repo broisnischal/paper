@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 jobs:
@@ -11,13 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Syntax check
-        run: bash -n bin/wallpaper && bash -n install.sh
+        run: bash -n bin/paper && bash -n install.sh
       - name: ShellCheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck -S warning bin/wallpaper install.sh
+          shellcheck -S warning bin/paper install.sh
       - name: Smoke test (help, version)
         run: |
-          chmod +x bin/wallpaper
-          ./bin/wallpaper --version
-          ./bin/wallpaper --help 2>&1 | head -5
+          chmod +x bin/paper
+          ./bin/paper --version
+          ./bin/paper --help 2>&1 | head -5
