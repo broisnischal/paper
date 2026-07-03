@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 const http = @import("http.zig");
 const config = @import("config.zig");
 
-const version = "0.2.1";
+const version = "0.2.2";
 const default_model = "black-forest-labs/FLUX.1-schnell";
 
 // ANSI styling (matches the original tool).
@@ -107,9 +107,6 @@ const App = struct {
         return null;
     }
 
-    fn need(self: *App, name: []const u8) void {
-        if (!self.has(name)) self.fatal("missing dependency: {s}", .{name});
-    }
 
     /// Run `argv`, returning stdout on a clean exit (arena-owned), else null.
     fn capture(self: *App, argv: []const []const u8) ?[]u8 {
@@ -154,33 +151,85 @@ const App = struct {
     }
 
     // -- resolution -----------------------------------------------------------
+    /// Detect the primary display resolution as "WxH", cached in opt.atleast.
+    /// Falls back to 1920x1080 when nothing reports a resolution.
     fn detectRes(self: *App) []const u8 {
         if (self.opt.atleast.len > 0) return self.opt.atleast;
-        detect: {
-            if (!self.has("hyprctl")) break :detect;
-            const out = self.capture(&.{ "hyprctl", "monitors", "-j" }) orelse break :detect;
-            const parsed = std.json.parseFromSlice(std.json.Value, self.arena, out, .{}) catch break :detect;
-            if (parsed.value != .array) break :detect;
-            var best_area: i64 = 0;
-            var best: []const u8 = "";
-            for (parsed.value.array.items) |m| {
-                if (m != .object) continue;
-                const wv = m.object.get("width") orelse continue;
-                const hv = m.object.get("height") orelse continue;
-                const wi = jsonInt(wv) orelse continue;
-                const hi = jsonInt(hv) orelse continue;
-                if (wi * hi > best_area) {
-                    best_area = wi * hi;
-                    best = std.fmt.allocPrint(self.arena, "{d}x{d}", .{ wi, hi }) catch continue;
-                }
-            }
-            if (best.len > 0) {
-                self.opt.atleast = best;
-                return best;
+        const found = switch (builtin.os.tag) {
+            .windows => self.detectResWindows(),
+            .macos => self.detectResMacos(),
+            else => self.detectResLinux(),
+        };
+        self.opt.atleast = found orelse "1920x1080";
+        return self.opt.atleast;
+    }
+
+    fn detectResLinux(self: *App) ?[]const u8 {
+        // Hyprland (JSON, most accurate — pick the largest monitor).
+        if (self.has("hyprctl")) {
+            if (self.capture(&.{ "hyprctl", "monitors", "-j" })) |out| {
+                if (std.json.parseFromSlice(std.json.Value, self.arena, out, .{})) |parsed| {
+                    if (parsed.value == .array) {
+                        var best_area: i64 = 0;
+                        var best: ?[]const u8 = null;
+                        for (parsed.value.array.items) |m| {
+                            if (m != .object) continue;
+                            const wi = jsonInt(m.object.get("width") orelse continue) orelse continue;
+                            const hi = jsonInt(m.object.get("height") orelse continue) orelse continue;
+                            if (wi * hi > best_area) {
+                                best_area = wi * hi;
+                                best = std.fmt.allocPrint(self.arena, "{d}x{d}", .{ wi, hi }) catch null;
+                            }
+                        }
+                        if (best) |b| return b;
+                    }
+                } else |_| {}
             }
         }
-        self.opt.atleast = "1920x1080";
-        return self.opt.atleast;
+        // wlr-randr (wlroots): the active mode line ends with "current".
+        if (self.has("wlr-randr")) {
+            if (self.capture(&.{"wlr-randr"})) |out| {
+                var lines = std.mem.splitScalar(u8, out, '\n');
+                while (lines.next()) |ln| {
+                    if (std.mem.indexOf(u8, ln, "current") != null) {
+                        if (scanWxH(self.arena, ln)) |r| return r;
+                    }
+                }
+            }
+        }
+        // X11: the current mode line is marked with '*'.
+        if (self.has("xrandr")) {
+            if (self.capture(&.{"xrandr"})) |out| {
+                var lines = std.mem.splitScalar(u8, out, '\n');
+                while (lines.next()) |ln| {
+                    if (std.mem.indexOfScalar(u8, ln, '*') != null) {
+                        if (scanWxH(self.arena, ln)) |r| return r;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    fn detectResWindows(self: *App) ?[]const u8 {
+        const ps =
+            "$v = Get-CimInstance Win32_VideoController | " ++
+            "Where-Object { $_.CurrentHorizontalResolution } | Select-Object -First 1; " ++
+            "if ($v) { Write-Output (\"{0}x{1}\" -f $v.CurrentHorizontalResolution, $v.CurrentVerticalResolution) }";
+        const out = self.capture(&.{ "powershell.exe", "-NoProfile", "-Command", ps }) orelse return null;
+        return scanWxH(self.arena, out);
+    }
+
+    fn detectResMacos(self: *App) ?[]const u8 {
+        const out = self.capture(&.{ "system_profiler", "SPDisplaysDataType" }) orelse return null;
+        // First "Resolution: 2560 x 1440" line is the main display.
+        var lines = std.mem.splitScalar(u8, out, '\n');
+        while (lines.next()) |ln| {
+            if (std.mem.indexOf(u8, ln, "Resolution") != null) {
+                if (scanWxH(self.arena, ln)) |r| return r;
+            }
+        }
+        return null;
     }
 
     // -- absolute path resolution --------------------------------------------
@@ -369,6 +418,9 @@ const App = struct {
     // -- picker ---------------------------------------------------------------
     fn pick(self: *App, results: []Result) ?*Result {
         if (results.len == 0) self.fatal("no results", .{});
+        // No fzf (e.g. a fresh Windows/Git Bash setup)? Use the built-in
+        // numbered picker so the tool works with zero extra dependencies.
+        if (!self.has("fzf")) return self.pickFallback(results);
         const have_chafa = self.has("chafa");
 
         // Download thumbnails concurrently into a temp dir.
@@ -448,6 +500,46 @@ const App = struct {
         return trimmed;
     }
 
+    /// Numbered-list picker (no external tools). Returns the chosen result.
+    fn pickFallback(self: *App, results: []Result) ?*Result {
+        var labels: std.ArrayList([]const u8) = .empty;
+        for (results) |r| labels.append(self.arena, r.label) catch return null;
+        const idx = self.chooseIndex(labels.items) orelse return null;
+        return &results[idx];
+    }
+
+    /// Print a numbered menu and read a 1-based choice from stdin.
+    /// Returns the 0-based index, or null on empty/invalid input.
+    fn chooseIndex(self: *App, labels: []const []const u8) ?usize {
+        self.err.writeByte('\n') catch {};
+        for (labels, 0..) |lab, i| {
+            self.err.print("  " ++ c.grn ++ "{d: >2}" ++ c.rst ++ "  {s}\n", .{ i + 1, lab }) catch {};
+        }
+        self.err.flush() catch {};
+        const prompt = std.fmt.allocPrint(self.arena, "\n  paper \u{276f} pick 1-{d} (enter to cancel): ", .{labels.len}) catch "pick: ";
+        const line = self.readLine(prompt);
+        if (line.len == 0) return null;
+        const n = std.fmt.parseInt(usize, line, 10) catch {
+            self.warn("not a number", .{});
+            return null;
+        };
+        if (n < 1 or n > labels.len) {
+            self.warn("out of range (1-{d})", .{labels.len});
+            return null;
+        }
+        return n - 1;
+    }
+
+    /// Print `prompt` to stderr and read a trimmed line from stdin.
+    fn readLine(self: *App, prompt: []const u8) []const u8 {
+        self.err.writeAll(prompt) catch {};
+        self.err.flush() catch {};
+        var buf: [4096]u8 = undefined;
+        var r = Io.File.stdin().reader(self.io, &buf);
+        const line = r.interface.takeDelimiterExclusive('\n') catch return "";
+        return self.arena.dupe(u8, std.mem.trim(u8, line, " \t\r")) catch "";
+    }
+
     fn mkTmpDir(self: *App) ![]const u8 {
         const base = self.env.get("TMPDIR") orelse "/tmp";
         const ts = Io.Timestamp.now(self.io, .real).toNanoseconds();
@@ -469,7 +561,6 @@ const App = struct {
 
     // -- commands -------------------------------------------------------------
     fn cmdSearch(self: *App, query: []const u8) void {
-        self.need("fzf");
         var client = http.Client.init(self.gpa, self.io);
         defer client.deinit();
         const results = self.fetch(&client, query);
@@ -492,7 +583,6 @@ const App = struct {
     }
 
     fn cmdLibrary(self: *App) void {
-        self.need("fzf");
         var files: std.ArrayList([]const u8) = .empty;
         var dir = Io.Dir.cwd().openDir(self.io, self.lib_dir, .{ .iterate = true }) catch
             self.fatal("library empty: {s}", .{self.lib_dir});
@@ -506,6 +596,18 @@ const App = struct {
         }
         if (files.items.len == 0) self.fatal("no images in {s}", .{self.lib_dir});
         std.mem.sort([]const u8, files.items, {}, lessThanStr);
+
+        // No fzf → numbered picker over the file basenames.
+        if (!self.has("fzf")) {
+            var labels: std.ArrayList([]const u8) = .empty;
+            for (files.items) |f| labels.append(self.arena, std.fs.path.basename(f)) catch {};
+            const idx = self.chooseIndex(labels.items) orelse {
+                self.info("cancelled", .{});
+                return;
+            };
+            self.apply(files.items[idx]);
+            return;
+        }
 
         var input: Io.Writer.Allocating = .init(self.arena);
         for (files.items) |f| input.writer.print("{s}\n", .{f}) catch {};
@@ -852,6 +954,45 @@ fn fieldAt(line: []const u8, delim: u8, index: usize) ?[]const u8 {
     return null;
 }
 
+/// Find the first "<W>x<H>" in `text` (allowing spaces around x, e.g.
+/// "2560 x 1440") with both dimensions >= 100, normalized to "WxH".
+fn scanWxH(arena: Allocator, text: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < text.len) {
+        if (!std.ascii.isDigit(text[i])) {
+            i += 1;
+            continue;
+        }
+        const ws = i;
+        while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
+        var j = i;
+        while (j < text.len and text[j] == ' ') j += 1;
+        if (j >= text.len or (text[j] != 'x' and text[j] != 'X')) continue;
+        j += 1;
+        while (j < text.len and text[j] == ' ') j += 1;
+        if (j >= text.len or !std.ascii.isDigit(text[j])) {
+            i = j;
+            continue;
+        }
+        const hs = j;
+        while (j < text.len and std.ascii.isDigit(text[j])) j += 1;
+        const w = std.fmt.parseInt(u32, text[ws..i], 10) catch {
+            i = j;
+            continue;
+        };
+        const h = std.fmt.parseInt(u32, text[hs..j], 10) catch {
+            i = j;
+            continue;
+        };
+        if (w < 100 or h < 100) {
+            i = j;
+            continue;
+        }
+        return std.fmt.allocPrint(arena, "{d}x{d}", .{ w, h }) catch null;
+    }
+    return null;
+}
+
 fn pickExt(url: []const u8) []const u8 {
     var end = url.len;
     if (std.mem.indexOfScalar(u8, url, '?')) |q| end = q;
@@ -1013,16 +1154,29 @@ fn run(self: *App, argv: []const [:0]const u8) !void {
 }
 
 fn promptQuery(self: *App) []const u8 {
-    self.err.writeAll("Search wallpapers: ") catch {};
-    self.err.flush() catch {};
-    var buf: [1024]u8 = undefined;
-    var r = Io.File.stdin().reader(self.io, &buf);
-    const line = r.interface.takeDelimiterExclusive('\n') catch return "";
-    return self.arena.dupe(u8, std.mem.trim(u8, line, " \t\r")) catch "";
+    return self.readLine("Search wallpapers: ");
 }
 
 fn eqOpt(a: []const u8, short: []const u8, long: []const u8) bool {
     return std.mem.eql(u8, a, short) or std.mem.eql(u8, a, long);
+}
+
+test "scanWxH parses common display outputs" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ "1920x1080", "1920x1080" }, // powershell (our format)
+        .{ "   1920x1080     60.00*+", "1920x1080" }, // xrandr current mode
+        .{ "Resolution: 2560 x 1440 Retina", "2560x1440" }, // system_profiler
+        .{ "eDP-1 connected primary 3840x2160+0+0", "3840x2160" }, // xrandr connected line
+        .{ "3440 X 1440", "3440x1440" }, // uppercase X + spaces
+    };
+    inline for (cases) |c2| {
+        const got = scanWxH(a, c2[0]).?;
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c2[1], got);
+    }
+    try std.testing.expect(scanWxH(a, "no display here") == null);
+    try std.testing.expect(scanWxH(a, "8x8 icon") == null); // below the 100px floor
 }
 
 fn takeVal(self: *App, argv: []const [:0]const u8, i: usize, name: []const u8) []const u8 {

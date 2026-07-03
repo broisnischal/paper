@@ -21,9 +21,9 @@ self-contained binary.
 ## Features
 
 - **Search** Wallhaven (no key), Unsplash & Pexels (optional keys)
-- **Inline previews** — thumbnails render right in an `fzf` picker; `Ctrl-O` opens the full image
+- **Works with zero extra tools** — a built-in numbered picker out of the box; add `fzf` + `chafa` for a fuzzy picker with inline thumbnail previews
+- **Auto-sized results** — detects your screen resolution (Hyprland, X11, Windows, macOS) and filters to wallpapers that fit
 - **AI generation** — `paper generate <prompt>` via open Hugging Face models
-- **Random & category** picks, filtered to at least your screen resolution
 - **Library** of everything you've downloaded (`~/Pictures/Wallpapers`)
 - **Auto-change** on a schedule — hourly / daily / weekly / custom
 - **Cross-platform apply** — Omarchy/swaybg/GNOME on Linux, System Events on macOS, PowerShell on Windows
@@ -40,9 +40,13 @@ startup is instant.
 curl -fsSL https://raw.githubusercontent.com/broisnischal/paper/master/install.sh | bash
 ```
 
-Downloads the prebuilt binary for your platform into `~/.local/bin`, and installs
-the optional picker tools (`fzf`, `chafa`) with your package manager. Skip the
-extras with `PAPER_SKIP_DEPS=1`.
+Downloads the prebuilt binary for your platform into `~/.local/bin`. It also
+tries to install the optional picker tools (`fzf`, `chafa`) with your package
+manager — but they aren't required: without them `paper` shows a simple numbered
+menu. Skip the extras with `PAPER_SKIP_DEPS=1`.
+
+**Windows:** run it in Git Bash (or WSL). The one-liner installs `paper.exe`;
+the numbered picker works with nothing else installed.
 
 ### Homebrew (macOS · Linux)
 
