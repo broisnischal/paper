@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 const http = @import("http.zig");
 const config = @import("config.zig");
 
-const version = "0.2.0";
+const version = "0.2.1";
 const default_model = "black-forest-labs/FLUX.1-schnell";
 
 // ANSI styling (matches the original tool).

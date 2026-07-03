@@ -1,45 +1,54 @@
+<div align="center">
+
 # paper
 
-A fast terminal wallpaper manager, built for **Omarchy** / Hyprland with
-cross-platform support (Linux · macOS · Windows). Search the best online
-wallpaper providers, preview thumbnails right in your terminal, generate
-wallpapers with open AI models, and rotate them automatically on a schedule.
+**A fast, native wallpaper manager for your terminal.**
 
-A single self-contained binary written in [Zig](https://ziglang.org): HTTPS and
-JSON are handled in-process, so **no `curl` or `jq`** is required. Thumbnails
-download concurrently, and startup is instant.
+Search the best wallpaper sites, preview thumbnails inline, generate art with
+open AI models, and rotate your wallpaper on a schedule — all from a single
+self-contained binary.
+
+[Install](#install) · [Usage](#usage) · [AI generation](#ai-generation) · [Auto-change](#auto-change) · [FAQ](#faq)
+
+[![CI](https://github.com/broisnischal/paper/actions/workflows/ci.yml/badge.svg)](https://github.com/broisnischal/paper/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/broisnischal/paper?color=25c65f)](https://github.com/broisnischal/paper/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ![demo](docs/demo.gif)
 
+</div>
+
 ## Features
 
-- 🔎 **Search** Wallhaven (no API key needed), Unsplash & Pexels (optional keys)
-- 🖼️ **Inline previews** in an `fzf` picker via `chafa` (press `Ctrl-O` to open full image in `imv`)
-- 🤖 **AI generation** via Hugging Face open models (default: `FLUX.1-schnell`) — `paper generate <prompt>`
-- 🎲 **Random / category-based** picks, filtered to at least your screen resolution
-- 📚 **Library** of everything you've downloaded (`~/Pictures/Wallpapers`)
-- ⏰ **Auto-change** on a schedule — `hourly` / `daily` / `weekly` / custom — via a systemd user timer
-- 🖥️ **Cross-platform apply**: Omarchy/swaybg/GNOME on Linux, `osascript` on macOS, PowerShell on Windows (Git Bash)
+- **Search** Wallhaven (no key), Unsplash & Pexels (optional keys)
+- **Inline previews** — thumbnails render right in an `fzf` picker; `Ctrl-O` opens the full image
+- **AI generation** — `paper generate <prompt>` via open Hugging Face models
+- **Random & category** picks, filtered to at least your screen resolution
+- **Library** of everything you've downloaded (`~/Pictures/Wallpapers`)
+- **Auto-change** on a schedule — hourly / daily / weekly / custom
+- **Cross-platform apply** — Omarchy/swaybg/GNOME on Linux, System Events on macOS, PowerShell on Windows
+
+Written in [Zig](https://ziglang.org): HTTPS and JSON are handled in-process, so
+there's **no `curl` or `jq` dependency**, thumbnails download concurrently, and
+startup is instant.
 
 ## Install
 
-### One-liner (Linux / macOS / Git Bash)
+### One line (Linux · macOS · Git Bash)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/broisnischal/paper/master/install.sh | bash
 ```
 
-Downloads the prebuilt binary for your platform and installs it into
-`~/.local/bin`.
+Downloads the prebuilt binary for your platform into `~/.local/bin`, and installs
+the optional picker tools (`fzf`, `chafa`) with your package manager. Skip the
+extras with `PAPER_SKIP_DEPS=1`.
 
-### Homebrew (macOS / Linux)
+### Homebrew (macOS · Linux)
 
 ```bash
 brew install broisnischal/paper/paper
 ```
-
-This taps [`broisnischal/homebrew-paper`](https://github.com/broisnischal/homebrew-paper)
-and pulls in `jq`, `fzf`, and `chafa` automatically.
 
 ### From source
 
@@ -48,40 +57,13 @@ Requires [Zig 0.16+](https://ziglang.org/download/).
 ```bash
 git clone https://github.com/broisnischal/paper.git
 cd paper
-zig build -Doptimize=ReleaseFast   # produces zig-out/bin/paper
-./install.sh                       # builds (if zig present) and installs to ~/.local/bin
+./install.sh          # builds an optimized binary and installs it
 ```
 
-`install.sh` builds an optimized binary when `zig` is available, otherwise it
-falls back to downloading a prebuilt archive from a [release](../../releases).
-`zig build run -- <args>` runs it directly during development.
+During development, run it directly with `zig build run -- mountains`.
 
-> The original Bash implementation is preserved at
-> [`legacy/paper.bash`](legacy/paper.bash) for reference.
-
-| Platform | Notes |
-|----------|-------|
-| Linux | Full support (Omarchy, Hyprland/swaybg, GNOME) incl. systemd scheduler |
-| macOS | `brew install broisnischal/paper/paper`; applies via System Events; schedule with launchd |
-| Windows | Git Bash or WSL; applies via PowerShell; schedule with Task Scheduler |
-
-### Dependencies
-
-HTTP and JSON are built in — there is **no `curl` or `jq` dependency**. The
-remaining tools are optional and only affect the interactive UX:
-
-| Tool | Needed for | Install |
-|------|-----------|---------|
-| `fzf` | the interactive picker (`search` / `library`) | usually preinstalled on Omarchy |
-| `chafa` | **inline image previews** | `sudo pacman -S chafa` / `brew install chafa` |
-| `imv` | open full image (`Ctrl-O`) | preinstalled on Omarchy |
-| `gum` | interactive key entry (`config keys`) | preinstalled on Omarchy |
-| `swaybg` / `omarchy` / `gsettings` | applying the wallpaper | preinstalled on Omarchy |
-
-> **What is `chafa`?** Terminals can't display a JPEG directly. `chafa` converts
-> an image into colored terminal characters so the picture renders *inside* the
-> `fzf` preview pane as you browse. Without it the picker still works — it just
-> lists results with no thumbnails.
+> Make sure `~/.local/bin` is on your `PATH`. See the [FAQ](#faq) if the `paper`
+> command runs the wrong program.
 
 ## Usage
 
@@ -89,34 +71,52 @@ remaining tools are optional and only affect the interactive UX:
 paper mountains at night          # search, preview, pick, set
 paper                             # prompt for a search term
 paper random cyberpunk city       # grab a random match and set it now
-paper --sort toplist minimal      # browse Wallhaven's top-rated
-paper --categories 100 nature     # general only (100=gen 010=anime 001=people)
 paper library                     # re-pick from your downloads
 paper set ~/Pictures/foo.jpg      # set a local file
-paper preview ~/Pictures/foo.jpg  # see an image rendered in the terminal
+paper preview ~/Pictures/foo.jpg  # render an image in the terminal
 paper current                     # show the current wallpaper path
 ```
 
-### AI generation
+<details>
+<summary><b>Options & search tuning</b></summary>
 
-Generate a wallpaper from a text prompt using open models on the
-[Hugging Face Inference API](https://huggingface.co/docs/api-inference) —
-sized to your screen automatically:
+```
+-s, --source <name>    wallhaven (default) | unsplash | pexels
+-c, --categories <b>   wallhaven bitmask general/anime/people (default 111)
+-p, --purity <b>       wallhaven bitmask sfw/sketchy/nsfw     (default 100)
+    --sort <mode>      relevance | random | toplist | views | favorites | date_added
+-n, --limit <N>        number of results to fetch (default 24)
+    --atleast <WxH>    minimum resolution (default: your screen)
+    --model <id>       Hugging Face model for 'generate'
+    --no-preview       list without thumbnail previews
+```
+
+```bash
+paper --sort toplist minimal      # browse Wallhaven's top-rated
+paper --categories 100 nature     # general only (100=gen 010=anime 001=people)
+```
+
+</details>
+
+## AI generation
+
+Generate a wallpaper from a prompt using open models on the
+[Hugging Face Inference API](https://huggingface.co/docs/api-inference), sized
+to your screen automatically:
 
 ```bash
 paper config set-key huggingface <token>   # free: huggingface.co/settings/tokens
 paper generate a cozy cabin in snowy mountains, golden hour
 paper --model stabilityai/stable-diffusion-xl-base-1.0 generate neon tokyo street
-paper config set-model <model-id>          # change the default model
 ```
 
-Default model is `black-forest-labs/FLUX.1-schnell` (fast, high quality, open
-weights). Any text-to-image model served by HF Inference works.
+The default model is `black-forest-labs/FLUX.1-schnell` (fast, high quality,
+open weights). Change it with `paper config set-model <id>`.
 
-### API keys
+## API keys
 
-Wallhaven works with no key. Add Unsplash / Pexels / Hugging Face keys to
-unlock those sources:
+Wallhaven works with no key. Add Unsplash / Pexels / Hugging Face keys to unlock
+those sources:
 
 ```bash
 paper config keys                 # interactive (recommended)
@@ -124,40 +124,79 @@ paper config set-key unsplash <key>
 paper config                      # show config (keys masked)
 ```
 
-Keys are stored in `~/.config/paper/config` (`chmod 600`). You can also use
-env vars: `WALLHAVEN_API_KEY`, `UNSPLASH_API_KEY`, `PEXELS_API_KEY`, `HF_API_KEY`.
+Keys live in `~/.config/paper/config` (`chmod 600`) or the environment
+(`WALLHAVEN_API_KEY`, `UNSPLASH_API_KEY`, `PEXELS_API_KEY`, `HF_API_KEY`).
 
-- Unsplash key: https://unsplash.com/developers → create an app → *Access Key*
-- Pexels key: https://www.pexels.com/api/
-- Hugging Face token: https://huggingface.co/settings/tokens (read access is enough)
+- Unsplash: https://unsplash.com/developers → create an app → *Access Key*
+- Pexels: https://www.pexels.com/api/
+- Hugging Face: https://huggingface.co/settings/tokens (read access is enough)
 
-### Auto-change (scheduler)
+## Auto-change
 
 Rotate your wallpaper automatically with a systemd user timer:
 
 ```bash
 paper auto daily nature           # a new nature wallpaper every day
 paper auto hourly                 # fully random, every hour
-paper auto weekly --categories 100
 paper auto custom "*-*-* 08,20:00:00"   # 8am & 8pm daily
 paper auto status                 # show schedule + next run
 paper auto off                    # stop
 ```
 
-Presets map to systemd `OnCalendar` keywords (`hourly`, `daily`, `weekly`).
-Custom takes any [`OnCalendar`](https://www.freedesktop.org/software/systemd/man/systemd.time.html)
-expression. `Persistent=true` means a missed change (laptop asleep) runs on
-next wake.
+`Persistent=true` means a change missed while asleep runs on next wake. On
+macOS / Windows, use `launchd` / Task Scheduler to run `paper random`.
+
+## Compatibility
+
+| Platform | Notes |
+|----------|-------|
+| Linux    | Full support (Omarchy, Hyprland/swaybg, GNOME) incl. the systemd scheduler |
+| macOS    | Applies via System Events; schedule with launchd |
+| Windows  | Git Bash or WSL; applies via PowerShell; schedule with Task Scheduler |
 
 ## Uninstall
 
 ```bash
-./install.sh --uninstall     # removes the symlink and disables the timer
+paper auto off               # stop the scheduler
+./install.sh --uninstall     # remove the binary and timer
 brew uninstall paper         # if installed via Homebrew
 ```
 
 Your config and downloaded wallpapers are left untouched.
 
+## FAQ
+
+<details>
+<summary><b>I typed <code>paper</code> and it printed "Letter: 8.5x11 in"</b></summary>
+
+That's `libpaper`'s `/usr/bin/paper`, not this tool. Your shell cached the old
+location. Run `hash -r` (bash) or `rehash` (zsh), or open a new terminal.
+`~/.local/bin` must come before `/usr/bin` on your `PATH`.
+
+</details>
+
+<details>
+<summary><b>Do I need <code>curl</code> or <code>jq</code>?</b></summary>
+
+No. HTTP (with TLS) and JSON are built into the binary. `fzf` and `chafa` are
+optional and only power the interactive picker and inline previews.
+
+</details>
+
+<details>
+<summary><b>What is <code>chafa</code>?</b></summary>
+
+Terminals can't display a JPEG directly. `chafa` converts an image into colored
+terminal characters so the picture renders inside the `fzf` preview pane. Without
+it the picker still works — it just lists results with no thumbnails.
+
+</details>
+
+## Contributing
+
+Issues and PRs welcome. Build with `zig build`, run the smoke tests with
+`zig build test`.
+
 ## License
 
-MIT © Nischal Dahal
+MIT © [Nischal Dahal](https://github.com/broisnischal)
