@@ -5,6 +5,10 @@ cross-platform support (Linux · macOS · Windows). Search the best online
 wallpaper providers, preview thumbnails right in your terminal, generate
 wallpapers with open AI models, and rotate them automatically on a schedule.
 
+A single self-contained binary written in [Zig](https://ziglang.org): HTTPS and
+JSON are handled in-process, so **no `curl` or `jq`** is required. Thumbnails
+download concurrently, and startup is instant.
+
 ![demo](docs/demo.gif)
 
 ## Features
@@ -25,7 +29,8 @@ wallpapers with open AI models, and rotate them automatically on a schedule.
 curl -fsSL https://raw.githubusercontent.com/broisnischal/paper/master/install.sh | bash
 ```
 
-Installs `paper` into `~/.local/bin`.
+Downloads the prebuilt binary for your platform and installs it into
+`~/.local/bin`.
 
 ### Homebrew (macOS / Linux)
 
@@ -38,14 +43,21 @@ and pulls in `jq`, `fzf`, and `chafa` automatically.
 
 ### From source
 
+Requires [Zig 0.16+](https://ziglang.org/download/).
+
 ```bash
 git clone https://github.com/broisnischal/paper.git
 cd paper
-./install.sh
+zig build -Doptimize=ReleaseFast   # produces zig-out/bin/paper
+./install.sh                       # builds (if zig present) and installs to ~/.local/bin
 ```
 
-`install.sh` symlinks `bin/paper` into `~/.local/bin`. You can also grab a
-prebuilt archive from a [release](../../releases).
+`install.sh` builds an optimized binary when `zig` is available, otherwise it
+falls back to downloading a prebuilt archive from a [release](../../releases).
+`zig build run -- <args>` runs it directly during development.
+
+> The original Bash implementation is preserved at
+> [`legacy/paper.bash`](legacy/paper.bash) for reference.
 
 | Platform | Notes |
 |----------|-------|
@@ -55,13 +67,16 @@ prebuilt archive from a [release](../../releases).
 
 ### Dependencies
 
+HTTP and JSON are built in — there is **no `curl` or `jq` dependency**. The
+remaining tools are optional and only affect the interactive UX:
+
 | Tool | Needed for | Install |
 |------|-----------|---------|
-| `curl`, `jq`, `fzf` | core | usually preinstalled on Omarchy |
+| `fzf` | the interactive picker (`search` / `library`) | usually preinstalled on Omarchy |
 | `chafa` | **inline image previews** | `sudo pacman -S chafa` / `brew install chafa` |
 | `imv` | open full image (`Ctrl-O`) | preinstalled on Omarchy |
-| `gum` | interactive key entry | preinstalled on Omarchy |
-| `swaybg` / `omarchy` | applying the wallpaper | preinstalled on Omarchy |
+| `gum` | interactive key entry (`config keys`) | preinstalled on Omarchy |
+| `swaybg` / `omarchy` / `gsettings` | applying the wallpaper | preinstalled on Omarchy |
 
 > **What is `chafa`?** Terminals can't display a JPEG directly. `chafa` converts
 > an image into colored terminal characters so the picture renders *inside* the

@@ -8,64 +8,61 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { os: linux,   arch: x86_64,  target: x86_64-linux-musl }
+          - { os: linux,   arch: aarch64, target: aarch64-linux-musl }
+          - { os: macos,   arch: x86_64,  target: x86_64-macos }
+          - { os: macos,   arch: aarch64, target: aarch64-macos }
+          - { os: windows, arch: x86_64,  target: x86_64-windows }
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lint
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          bash -n bin/paper
-          shellcheck -S warning bin/paper install.sh
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
-      - name: Package per-platform artifacts
+      - name: Cross-compile ${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
+      - name: Package
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p dist
+          pkg="paper-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "dist/$pkg"
+          if [ "${{ matrix.os }}" = windows ]; then
+            cp zig-out/bin/paper.exe "dist/$pkg/"
+          else
+            cp zig-out/bin/paper "dist/$pkg/"
+          fi
+          cp README.md LICENSE "dist/$pkg/"
+          if [ "${{ matrix.os }}" = windows ]; then
+            (cd dist && zip -qr "$pkg.zip" "$pkg")
+          else
+            tar -C dist -czf "dist/$pkg.tar.gz" "$pkg"
+          fi
+          rm -rf "dist/$pkg"
 
-          write_notes() {
-            case "$1" in
-              linux)
-                printf '%s\n' \
-                  "Linux (Omarchy / Hyprland / GNOME)" \
-                  "  ./install.sh            # symlinks into ~/.local/bin" \
-                  "Deps: curl jq fzf; chafa (previews); swaybg or gsettings backend." ;;
-              macos)
-                printf '%s\n' \
-                  "macOS" \
-                  "  brew install broisnischal/paper/paper   # via Homebrew tap (recommended)" \
-                  "or manually:" \
-                  "  brew install jq fzf chafa" \
-                  "  ./install.sh            # symlinks into ~/.local/bin" \
-                  "Wallpaper is applied via osascript (System Events)." \
-                  "Scheduler: use launchd to run 'paper random' (systemd is Linux-only)." ;;
-              windows)
-                printf '%s\n' \
-                  "Windows (Git Bash or WSL)" \
-                  "  Git Bash: install jq + fzf (e.g. via scoop), then ./install.sh" \
-                  "  Wallpaper is applied via PowerShell (SystemParametersInfo)." \
-                  "  WSL: follow the Linux instructions inside your distro." \
-                  "Scheduler: use Task Scheduler to run 'paper random'." ;;
-            esac
-          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paper-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
 
-          for os in linux macos windows; do
-            pkg="paper-${VERSION}-${os}"
-            mkdir -p "dist/$pkg"
-            cp bin/paper install.sh README.md LICENSE "dist/$pkg/"
-            write_notes "$os" > "dist/$pkg/INSTALL.txt"
-            if [ "$os" = windows ]; then
-              (cd dist && zip -qr "$pkg.zip" "$pkg")
-            else
-              tar -C dist -czf "dist/$pkg.tar.gz" "$pkg"
-            fi
-            rm -rf "dist/$pkg"
-          done
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
-          (cd dist && sha256sum ./*.tar.gz ./*.zip > checksums.txt)
-          ls -la dist/
+      - name: Checksums
+        run: (cd dist && sha256sum ./*.tar.gz ./*.zip > checksums.txt && ls -la)
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -81,7 +78,7 @@ jobs:
           TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "$TAP_TOKEN" ]; then
+          if [ -z "${TAP_TOKEN:-}" ]; then
             echo "TAP_GITHUB_TOKEN secret not set — skipping tap bump."
             exit 0
           fi

@@ -1,3 +1,8 @@
 # local artifacts
 *.bak.*
 docs/demo.gif
+
+# zig build output
+zig-out/
+.zig-cache/
+dist/
