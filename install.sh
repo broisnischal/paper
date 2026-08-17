@@ -5,8 +5,8 @@
 #
 # From a source checkout with zig installed, this builds an optimized binary;
 # otherwise it downloads the prebuilt binary for your platform from the latest
-# release. Optional UX tools (fzf, chafa) are installed via your package
-# manager unless PAPER_SKIP_DEPS=1.
+# release. Optional tools (fzf, chafa, ffmpeg, yt-dlp) are installed via your
+# package manager unless PAPER_SKIP_DEPS=1.
 set -euo pipefail
 
 REPO="broisnischal/paper"
@@ -15,11 +15,14 @@ BIN_DST="$BIN_DIR/paper"
 
 # ---- uninstall -------------------------------------------------------------
 if [[ "${1:-}" == "--uninstall" ]]; then
+  "$HOME/.local/bin/paper" live off >/dev/null 2>&1 || true
   for unit in paper-auto wallpaper-auto; do
     systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || true
     rm -f "$HOME/.config/systemd/user/$unit.service" \
           "$HOME/.config/systemd/user/$unit.timer"
   done
+  systemctl --user disable --now paper-live.service >/dev/null 2>&1 || true
+  rm -f "$HOME/.config/systemd/user/paper-live.service"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
   rm -f "$BIN_DST" "$BIN_DIR/wallpaper"
   echo "Uninstalled. Config (~/.config/paper) and wallpapers were kept."
@@ -49,7 +52,9 @@ if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; 
 
 install_deps() {
   [[ "${PAPER_SKIP_DEPS:-0}" == "1" ]] && return 0
-  local want=(fzf chafa) missing=()
+  # ffmpeg powers video previews and the still-frame fallback; yt-dlp is the
+  # video wallpaper search backend.
+  local want=(fzf chafa ffmpeg yt-dlp) missing=()
   for t in "${want[@]}"; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
   [[ ${#missing[@]} -eq 0 ]] && return 0
 
@@ -117,5 +122,20 @@ if command -v paper >/dev/null 2>&1 && [[ "$(command -v paper)" != "$BIN_DST" ]]
   warn "another 'paper' (\"$(command -v paper)\", likely libpaper) is ahead in PATH."
   warn "run 'hash -r' (bash) or 'rehash' (zsh), or open a new terminal."
 fi
+
+# ---- video backend hint ----------------------------------------------------
+# mpvpaper is AUR-only on Arch and absent from most distro repos, so point at
+# it rather than guessing a package name.
+video_backend_hint() {
+  [[ "$OS" == linux ]] || return 0
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    command -v mpvpaper >/dev/null 2>&1 && return 0
+    warn "for video wallpapers on Wayland, install mpvpaper (AUR: yay -S mpvpaper)"
+  else
+    command -v xwinwrap >/dev/null 2>&1 && command -v mpv >/dev/null 2>&1 && return 0
+    warn "for video wallpapers on X11, install xwinwrap and mpv"
+  fi
+}
+video_backend_hint
 
 info "Done. Try:  paper mountains"

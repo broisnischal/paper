@@ -4,11 +4,11 @@
 
 **A fast, native wallpaper manager for your terminal.**
 
-Search the best wallpaper sites, preview thumbnails inline, generate art with
-open AI models, and rotate your wallpaper on a schedule — all from a single
-self-contained binary.
+Search the best wallpaper sites, preview thumbnails inline, play a video as your
+desktop background, generate art with open AI models, and rotate your wallpaper
+on a schedule. One self-contained binary.
 
-[Install](#install) · [Usage](#usage) · [AI generation](#ai-generation) · [Auto-change](#auto-change) · [FAQ](#faq)
+[Install](#install) · [Usage](#usage) · [Live video](#live-video-wallpaper) · [AI generation](#ai-generation) · [Auto-change](#auto-change) · [FAQ](#faq)
 
 [![CI](https://github.com/broisnischal/paper/actions/workflows/ci.yml/badge.svg)](https://github.com/broisnischal/paper/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/broisnischal/paper?color=25c65f)](https://github.com/broisnischal/paper/releases/latest)
@@ -21,6 +21,7 @@ self-contained binary.
 ## Features
 
 - **Search** Wallhaven (no key), Unsplash & Pexels (optional keys)
+- **Live video wallpapers** with `paper video minecraft` or `paper live clip.mp4`, on Wayland, X11 and Windows
 - **Works with zero extra tools** — a built-in numbered picker out of the box; add `fzf` + `chafa` for a fuzzy picker with inline thumbnail previews
 - **Auto-sized results** — detects your screen resolution (Hyprland, X11, Windows, macOS) and filters to wallpapers that fit
 - **AI generation** — `paper generate <prompt>` via open Hugging Face models
@@ -75,9 +76,9 @@ During development, run it directly with `zig build run -- mountains`.
 paper mountains at night          # search, preview, pick, set
 paper                             # prompt for a search term
 paper random cyberpunk city       # grab a random match and set it now
-paper library                     # re-pick from your downloads
+paper library                     # re-pick from your downloads (images + video)
 paper set ~/Pictures/foo.jpg      # set a local file
-paper preview ~/Pictures/foo.jpg  # render an image in the terminal
+paper preview ~/Pictures/foo.jpg  # render an image (or a video frame) inline
 paper current                     # show the current wallpaper path
 ```
 
@@ -93,6 +94,9 @@ paper current                     # show the current wallpaper path
     --atleast <WxH>    minimum resolution (default: your screen)
     --model <id>       Hugging Face model for 'generate'
     --no-preview       list without thumbnail previews
+    --fit <mode>       video sizing: fill (default) | fit | stretch
+    --sound            keep the audio track of a live wallpaper
+    --output <name>    play the video on one monitor only (e.g. HDMI-A-1)
 ```
 
 ```bash
@@ -101,6 +105,56 @@ paper --categories 100 nature     # general only (100=gen 010=anime 001=people)
 ```
 
 </details>
+
+## Live video wallpaper
+
+Play a video behind your desktop, with the same search-and-pick flow as still
+wallpapers:
+
+```bash
+paper video minecraft               # search, preview the thumbnails, pick, play
+paper video lofi rain               # anything: anime, games, nature, space
+paper video -s pexels ocean waves   # stock footage instead (needs a Pexels key)
+paper live ~/Videos/loop.mp4        # play a local file
+paper live https://host/clip.mp4    # or stream a URL (mpv handles it)
+paper live status                   # what's playing, on which backend
+paper live off                      # stop; the last still wallpaper comes back
+paper live restore                  # play the saved video again
+paper live autostart on             # replay it at every login
+```
+
+`paper video` searches YouTube through `yt-dlp`, downloads the video track only
+(no audio, so files stay small), and drops it in `~/Pictures/Wallpapers` next to
+your stills. That is where the game and anime loops are: `-s pexels` switches to
+stock footage, which is nature and abstract only and needs a free
+[Pexels key](https://www.pexels.com/api/).
+
+Everything downloaded is a normal file, so `paper library` re-picks any of them
+later and `paper set` works on a `.mp4` like it does on a `.jpg`. Setting a still
+image stops the video first, so the two never fight over the same screen.
+
+### What plays it
+
+| Session | Backend | Install |
+|---------|---------|---------|
+| Wayland (Hyprland, sway, wlroots) | `mpvpaper` on a background layer surface | `yay -S mpvpaper` |
+| X11 | `xwinwrap` + `mpv` in a window pinned below everything | your package manager or AUR |
+| Windows | `mpv`, reparented into the desktop's `WorkerW` window | `scoop install mpv` |
+| macOS | no CLI-accessible desktop layer | falls back to a still frame |
+
+Without a backend, `paper` pulls one frame out of the video with `ffmpeg` and
+sets that as a normal wallpaper, then tells you what to install for the real
+thing. Searching needs `yt-dlp` on PATH; local files need nothing at all.
+
+A few behaviours worth knowing:
+
+- `-p` is passed to `mpvpaper`, so playback pauses while the wallpaper is
+  covered. On a tiling WM that means near-zero CPU most of the time.
+- Audio is muted unless `--sound` is passed.
+- `--fit fill` (the default) crops the overflow so there are no black bars.
+  Use `--fit fit` to see the whole frame, `--fit stretch` to distort it.
+- Short loops beat long clips. A 5 to 15 second video is a few MB and
+  repeats without a visible seam.
 
 ## AI generation
 
@@ -152,17 +206,19 @@ macOS / Windows, use `launchd` / Task Scheduler to run `paper random`.
 
 ## Compatibility
 
-| Platform | Notes |
-|----------|-------|
-| Linux    | Full support (Omarchy, Hyprland/swaybg, GNOME) incl. the systemd scheduler |
-| macOS    | Applies via System Events; schedule with launchd |
-| Windows  | Git Bash or WSL; applies via PowerShell; schedule with Task Scheduler |
+| Platform | Stills | Video | Notes |
+|----------|--------|-------|-------|
+| Linux    | Omarchy, swaybg, GNOME | `mpvpaper` (Wayland), `xwinwrap` (X11) | systemd timer for auto-change, systemd unit for video autostart |
+| macOS    | System Events | still frame only | schedule with launchd |
+| Windows  | PowerShell | `mpv` in `WorkerW` | Git Bash or WSL; schedule with Task Scheduler |
 
 ## Uninstall
 
 ```bash
 paper auto off               # stop the scheduler
-./install.sh --uninstall     # remove the binary and timer
+paper live off               # stop a video wallpaper
+paper live autostart off     # drop the login unit
+./install.sh --uninstall     # remove the binary and units
 brew uninstall paper         # if installed via Homebrew
 ```
 
@@ -184,6 +240,18 @@ location. Run `hash -r` (bash) or `rehash` (zsh), or open a new terminal.
 
 No. HTTP (with TLS) and JSON are built into the binary. `fzf` and `chafa` are
 optional and only power the interactive picker and inline previews.
+
+</details>
+
+<details>
+<summary><b>My video wallpaper doesn't show up</b></summary>
+
+Run `paper live status`. If the backend is `none`, install the one for your
+session: `mpvpaper` on Wayland, `xwinwrap` plus `mpv` on X11, `mpv` on Windows.
+If it says `stopped`, the player exited: try `mpv --no-audio <file>` directly to
+see the real error, usually a codec the GPU can't decode. On Wayland, another
+wallpaper daemon (`swaybg`, `hyprpaper`, `swww`) may be drawing on top of the
+same layer; stop it first.
 
 </details>
 

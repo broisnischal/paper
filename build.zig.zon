@@ -1,6 +1,6 @@
 .{
     .name = .paper,
-    .version = "0.2.2",
+    .version = "0.3.0",
     .fingerprint = 0x4e1a60162d6e4f51,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
