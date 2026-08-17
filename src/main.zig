@@ -103,6 +103,8 @@ const Options = struct {
     atleast: []const u8 = "", // empty => auto-detect
     hf_model: []const u8 = default_model,
     // live (video) wallpaper
+    random: bool = false,
+    video: bool = false,
     fit: live.Fit = .fill,
     sound: bool = false,
     output: []const u8 = "*",
@@ -250,6 +252,15 @@ const App = struct {
         }
         const name = self.procName(pid) orelse return false;
         return std.mem.indexOf(u8, name, binary) != null or std.mem.indexOf(u8, binary, name) != null;
+    }
+
+    /// Uniform index in [0, n). Seeded from the clock, which is plenty for
+    /// picking a wallpaper.
+    fn randomIndex(self: *App, n: usize) usize {
+        if (n <= 1) return 0;
+        const ns: i64 = @truncate(Io.Timestamp.now(self.io, .real).toNanoseconds());
+        var prng: std.Random.DefaultPrng = .init(@bitCast(ns));
+        return prng.random().uintLessThan(usize, n);
     }
 
     fn sleepMs(self: *App, ms: i64) void {
@@ -857,12 +868,10 @@ const App = struct {
     fn fetchYoutube(self: *App, query: []const u8) []Result {
         if (!self.has("yt-dlp"))
             self.fatal("this source needs yt-dlp (pacman -S yt-dlp, brew install yt-dlp, scoop install yt-dlp)", .{});
-        if (query.len == 0) self.fatal("usage: paper video <query...>   (e.g. paper video minecraft)", .{});
-
         const n = @min(self.opt.limit, 40);
         const spec = std.fmt.allocPrint(self.arena, "ytsearch{d}:{s} live wallpaper loop", .{ n, query }) catch self.fatal("oom", .{});
         const end = std.fmt.allocPrint(self.arena, "{d}", .{n}) catch self.fatal("oom", .{});
-        self.info("Searching YouTube for '{s}' live wallpapers\u{2026}", .{query});
+        self.info("Searching YouTube for '{s}' live wallpapers\u{2026}", .{if (query.len > 0) query else "4k"});
         const out = self.capture(&.{ "yt-dlp", "-J", "--flat-playlist", "--playlist-end", end, spec }) orelse
             self.fatal("yt-dlp search failed (network? outdated yt-dlp?)", .{});
 
@@ -872,13 +881,20 @@ const App = struct {
         const entries = root.object.get("entries") orelse self.fatal("no results", .{});
         if (entries != .array) self.fatal("unexpected yt-dlp response", .{});
 
+        // Unattended runs must not pull a 40-minute ambience stream, so the
+        // cap is tighter when nobody is there to look at the duration.
+        const max_secs: i64 = if (self.opt.random) 300 else 900;
+        var too_long: usize = 0;
         var list: std.ArrayList(Result) = .empty;
         for (entries.array.items) |item| {
             if (item != .object) continue;
             const o = item.object;
             const id = jsonStr(o, "id") orelse continue;
             const dur = if (o.get("duration")) |v| jsonInt(v) orelse 0 else 0;
-            if (dur > 1800) continue; // an hour-long upload is not a wallpaper
+            if (dur > max_secs) {
+                too_long += 1;
+                continue;
+            }
             const title = jsonStr(o, "title") orelse "";
             const chan = jsonStr(o, "channel") orelse jsonStr(o, "uploader") orelse "";
             // Width specs print a sign for signed ints, so format unsigned.
@@ -894,6 +910,8 @@ const App = struct {
                 .thumb_url = std.fmt.allocPrint(self.arena, "https://i.ytimg.com/vi/{s}/mqdefault.jpg", .{id}) catch "",
             }) catch break;
         }
+        if (list.items.len == 0 and too_long > 0)
+            self.fatal("every hit was longer than {d}s (add 'loop' or 'short' to the query)", .{max_secs});
         return list.items;
     }
 
@@ -911,7 +929,12 @@ const App = struct {
         const fmt = std.fmt.allocPrint(self.arena, "bv*[height<={d}][ext=mp4][protocol^=https]/bv*[ext=mp4][protocol^=https]/b[ext=mp4]/b", .{self.screenHeight()}) catch self.fatal("oom", .{});
         const tmpl = std.fmt.allocPrint(self.arena, "{s}/yt-{s}.%(ext)s", .{ self.lib_dir, id }) catch self.fatal("oom", .{});
         self.info("Downloading\u{2026}", .{});
-        const code = self.spawnWait(&.{ "yt-dlp", "-f", fmt, "--no-playlist", "--no-part", "-o", tmpl, url }) orelse
+        const code = self.spawnWait(&.{
+            "yt-dlp",         "-f",  fmt, "--no-playlist", "--no-part",
+            "--max-filesize", "400M", // a wallpaper loop is never this big
+            "--socket-timeout", "30", "--retries", "3",
+            "-o",             tmpl, url,
+        }) orelse
             self.fatal("could not run yt-dlp", .{});
         if (code != 0) self.fatal("yt-dlp failed (exit {d}). YouTube breaks extractors often: try 'yt-dlp -U', then pick again.", .{code});
         return self.findByPrefix(self.lib_dir, prefix) orelse self.fatal("yt-dlp produced no file", .{});
@@ -959,6 +982,16 @@ const App = struct {
     }
 
     // -- picker ---------------------------------------------------------------
+    /// `--random` skips the picker and takes one of the results; otherwise the
+    /// interactive picker runs as usual.
+    fn choose(self: *App, results: []Result) ?*Result {
+        if (!self.opt.random) return self.pick(results);
+        if (results.len == 0) return null;
+        const r = &results[self.randomIndex(results.len)];
+        self.info("Picked " ++ c.dim ++ "{s}" ++ c.rst, .{r.label});
+        return r;
+    }
+
     fn pick(self: *App, results: []Result) ?*Result {
         if (results.len == 0) self.fatal("no results", .{});
         // No fzf (e.g. a fresh Windows/Git Bash setup)? Use the built-in
@@ -1126,7 +1159,7 @@ const App = struct {
             self.opt.source = "youtube";
             const results = self.fetchYoutube(query);
             if (results.len == 0) self.fatal("no videos found (try a broader query)", .{});
-            const chosen = self.pick(results) orelse {
+            const chosen = self.choose(results) orelse {
                 self.info("cancelled", .{});
                 return;
             };
@@ -1138,8 +1171,8 @@ const App = struct {
         var client = http.Client.init(self.gpa, self.io);
         defer client.deinit();
         const results = self.fetchPexelsVideos(&client, query);
-        if (results.len == 0) self.fatal("no videos found (Pexels is stock footage only — for games or anime try: paper video -s youtube {s})", .{query});
-        const chosen = self.pick(results) orelse {
+        if (results.len == 0) self.fatal("no videos found (Pexels is stock footage only. For games or anime try: paper video -s youtube {s})", .{query});
+        const chosen = self.choose(results) orelse {
             self.info("cancelled", .{});
             return;
         };
@@ -1330,6 +1363,7 @@ const App = struct {
             self.say("  {s:<16} {s}", .{ "source", self.cfg.get("AUTO_SOURCE") orelse "wallhaven" });
             self.say("  {s:<16} {s}", .{ "query", self.cfg.get("AUTO_QUERY") orelse "<random>" });
             self.say("  {s:<16} {s}", .{ "categories", self.cfg.get("AUTO_CATEGORIES") orelse "111" });
+        self.say("  {s:<16} {s}", .{ "kind", if (self.cfg.get("AUTO_VIDEO") != null) "live video" else "still image" });
         } else if (std.mem.eql(u8, sub, "set-key")) {
             if (rest.len < 2) self.fatal("usage: paper config set-key <wallhaven|unsplash|pexels|huggingface> <key>", .{});
             const provider = rest[0];
@@ -1400,6 +1434,7 @@ const App = struct {
         self.cfg.set("AUTO_SOURCE", self.opt.source) catch {};
         self.cfg.set("AUTO_QUERY", query) catch {};
         self.cfg.set("AUTO_CATEGORIES", self.opt.categories) catch {};
+        self.cfg.set("AUTO_VIDEO", if (self.opt.video) "1" else "") catch {};
 
         const self_path = self.selfPath();
         const unit_dir = std.fmt.allocPrint(self.arena, "{s}/systemd/user", .{self.xdgConfig()}) catch self.fatal("oom", .{});
@@ -1436,10 +1471,11 @@ const App = struct {
         _ = self.capture(&.{ "systemctl", "--user", "daemon-reload" });
         _ = self.capture(&.{ "systemctl", "--user", "enable", "--now", "paper-auto.timer" });
         self.info("Auto-change enabled: " ++ c.bold ++ "{s}" ++ c.rst ++ " ({s})", .{ label, oncal });
+        const kind: []const u8 = if (self.opt.video) "live video" else "still image";
         if (query.len > 0) {
-            self.info("Query: '{s}'  ·  categories: {s}  ·  source: {s}", .{ query, self.opt.categories, self.opt.source });
+            self.info("Query: '{s}'  ·  {s}  ·  source: {s}", .{ query, kind, self.opt.source });
         } else {
-            self.info("Fully random  ·  categories: {s}  ·  source: {s}", .{ self.opt.categories, self.opt.source });
+            self.info("Fully random  ·  {s}  ·  source: {s}", .{ kind, self.opt.source });
         }
         self.autoStatus();
     }
@@ -1464,7 +1500,13 @@ const App = struct {
         self.opt.source = self.cfg.get("AUTO_SOURCE") orelse "wallhaven";
         self.opt.categories = self.cfg.get("AUTO_CATEGORIES") orelse "111";
         self.opt.preview = false;
-        self.cmdRandom(self.cfg.get("AUTO_QUERY") orelse "");
+        const query = self.cfg.get("AUTO_QUERY") orelse "";
+        if (self.cfg.get("AUTO_VIDEO") != null) {
+            self.opt.random = true; // nobody is at the keyboard to pick
+            self.cmdVideo(query);
+            return;
+        }
+        self.cmdRandom(query);
     }
 
     /// Absolute path to this executable — systemd's ExecStart requires it.
@@ -1727,6 +1769,10 @@ fn run(self: *App, argv: []const [:0]const u8) !void {
             i += 1;
             const v = takeVal(self, argv, i, "--fit");
             self.opt.fit = live.Fit.parse(v) orelse self.fatal("--fit expects fill|fit|stretch", .{});
+        } else if (std.mem.eql(u8, a, "--random")) {
+            self.opt.random = true;
+        } else if (std.mem.eql(u8, a, "--video")) {
+            self.opt.video = true;
         } else if (std.mem.eql(u8, a, "--sound")) {
             self.opt.sound = true;
         } else if (std.mem.eql(u8, a, "--output")) {
@@ -1859,6 +1905,7 @@ const usage_text =
     "  paper preview <path>          render an image/video frame in the terminal\n\n" ++
     c.bold ++ "LIVE VIDEO WALLPAPER" ++ c.rst ++ "\n" ++
     "  paper video <query...>        search video wallpapers, pick, set as live bg\n" ++
+    "  paper video --random <q...>   skip the picker, take a random match\n" ++
     "  paper video -s pexels <q...>  stock footage instead of YouTube\n" ++
     "  paper live <path.mp4>         play a local video as the wallpaper\n" ++
     "  paper live status             show what's playing\n" ++
@@ -1875,6 +1922,7 @@ const usage_text =
     "  paper config path             print the config file path\n\n" ++
     c.bold ++ "AUTO-CHANGE (systemd timer)" ++ c.rst ++ "\n" ++
     "  paper auto hourly|daily|weekly [query]\n" ++
+    "  paper auto daily --video minecraft   rotate live video wallpapers\n" ++
     "  paper auto custom \"<expr>\" [query]   custom schedule (systemd OnCalendar)\n" ++
     "  paper auto status | off\n\n" ++
     c.bold ++ "OPTIONS" ++ c.rst ++ "\n" ++
@@ -1888,6 +1936,8 @@ const usage_text =
     "      --model <id>       Hugging Face model for 'generate'\n" ++
     "      --no-preview       list without thumbnail previews\n" ++
     "      --fit <mode>       video sizing: fill (default) | fit | stretch\n" ++
+    "      --random           pick a random result instead of prompting\n" ++
+    "      --video            with 'auto': schedule live videos, not stills\n" ++
     "      --sound            keep the audio track of a live wallpaper\n" ++
     "      --output <name>    play the video on one monitor only (e.g. HDMI-A-1)\n" ++
     "  -v, --version          print version\n" ++

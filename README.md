@@ -123,6 +123,19 @@ paper live restore                  # play the saved video again
 paper live autostart on             # replay it at every login
 ```
 
+Random, no picker:
+
+```bash
+paper video --random minecraft      # search, take one at random, play it
+paper auto daily --video minecraft  # a different one every day
+paper auto hourly --video           # fully random live wallpapers, hourly
+paper auto off                      # back to a fixed wallpaper
+```
+
+`--random` and the scheduler both skip clips longer than 5 minutes, so an
+unattended run never pulls down a 40 minute ambience stream. Interactive
+searches allow up to 15 minutes, and yt-dlp is capped at 400 MB either way.
+
 `paper video` searches YouTube through `yt-dlp`, downloads the video track only
 (no audio, so files stay small), and drops it in `~/Pictures/Wallpapers` next to
 your stills. That is where the game and anime loops are: `-s pexels` switches to
